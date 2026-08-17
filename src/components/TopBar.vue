@@ -1,7 +1,7 @@
 <template>
   <div class="top-bar">
     <div class="search-box">
-      <img src="/image/search1.svg" alt="Search" class="icon-sm" />
+      <img :src="getImageUrl('/image/search1.svg')" alt="Search" class="icon-sm" />
       <input 
         type="text" 
         placeholder="Поиск" 
@@ -36,7 +36,7 @@
 
     <button class="map-btn" @click="$emit('toggleMap')">
       На карте
-      <img src="/image/Group.svg" alt="Map" class="icon-sm" />
+      <img :src="getImageUrl('/image/Group.svg')" alt="Map" class="icon-sm" />
     </button>
   </div>
 </template>
@@ -54,4 +54,13 @@ defineProps({
 })
 
 defineEmits(['update:searchQuery', 'update:activeTab', 'toggleMap'])
+
+function getImageUrl(path) {
+  if (!path) return ''
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
+    return path
+  }
+  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
+  return base + path.replace(/^\//, '')
+}
 </script>

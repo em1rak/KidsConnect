@@ -9,7 +9,7 @@
         <div class="custom-dropdown" ref="dropdownRef">
           <div class="select-wrapper" @click="toggleDropdown">
             <span class="select-value">{{ selectedAge }}</span>
-            <img src="/image/chevrondown1.svg" class="select-icon" alt="arrow" />
+            <img :src="getImageUrl('/image/chevrondown1.svg')" class="select-icon" alt="arrow" />
           </div>
           
           <div class="dropdown-list" :class="{ show: isDropdownOpen }">
@@ -38,7 +38,7 @@
               @change="emitGenderChange"
             />
             <span class="check-box">
-              <img v-if="genderMale" src="/image/check.svg" alt="check" />
+              <img v-if="genderMale" :src="getImageUrl('/image/check.svg')" alt="check" />
             </span>
             Мужской
           </label>
@@ -51,7 +51,7 @@
               @change="emitGenderChange"
             />
             <span class="check-box">
-              <img v-if="genderFemale" src="/image/check.svg" alt="check" />
+              <img v-if="genderFemale" :src="getImageUrl('/image/check.svg')" alt="check" />
             </span>
             Женский
           </label>
@@ -63,24 +63,24 @@
         <label>Каталог</label>
         <ul>
           <li 
-            v-for="(cat, index) in categories" 
-            :key="index"
+            v-for="cat in displayCategories" 
+            :key="cat.name"
             :class="{ 'active-category': cat.expanded }"
           >
             <div class="menu-item" @click="toggleCategory(cat)">
               <span class="menu-text">{{ cat.name }}</span>
-              <span v-if="cat.count" class="menu-count">{{ cat.count }}</span>
-              <img src="/image/chevrondown1.svg" class="chevron" alt="chevron" />
+              <span v-if="cat.count > 0" class="menu-count">{{ cat.count }}</span>
+              <img :src="getImageUrl('/image/chevrondown1.svg')" class="chevron" alt="chevron" />
             </div>
             
             <ul v-if="cat.subItems && cat.subItems.length" class="sub-menu">
               <li 
-                v-for="(sub, subIdx) in cat.subItems" 
-                :key="subIdx"
+                v-for="sub in cat.subItems" 
+                :key="sub.name"
                 @click.stop="selectSubCategory(cat, sub)"
               >
                 <span class="menu-text">• {{ sub.name }}</span>
-                <span v-if="sub.count" class="menu-count">{{ sub.count }}</span>
+                <span v-if="sub.count > 0" class="menu-count">{{ sub.count }}</span>
               </li>
             </ul>
           </li>
@@ -92,12 +92,24 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 
 const props = defineProps({
   selectedAge: {
     type: String,
     default: 'Любой'
+  },
+  selectedCategory: {
+    type: String,
+    default: null
+  },
+  selectedSubCategory: {
+    type: String,
+    default: null
+  },
+  activities: {
+    type: Array,
+    default: () => []
   }
 })
 
@@ -118,24 +130,8 @@ const ageOptions = [
 ]
 
 const categories = ref([
-  {
-    name: 'Силовой спорт',
-    count: 4,
-    expanded: true,
-    subItems: [
-      { name: 'Тяжелая атлетика', count: 3 },
-      { name: 'Пауэрлифтинг', count: 1 }
-    ]
-  },
-  {
-    name: 'Единоборства',
-    count: 2,
-    expanded: false,
-    subItems: [
-      { name: 'Вольная борьба', count: 1 },
-      { name: 'Дзюдо', count: 1 }
-    ]
-  },
+  { name: 'Силовой спорт', expanded: false },
+  { name: 'Единоборства', expanded: false },
   { name: 'ДПИ и ремесла', expanded: false },
   { name: 'Техническое конструирование', expanded: false },
   { name: 'Словесность', expanded: false },
@@ -162,6 +158,110 @@ const categories = ref([
   { name: 'Физкультура', expanded: false }
 ])
 
+function normalizeKey(str) {
+  if (!str) return ''
+  return str.toLowerCase()
+            .replace(/^#/, '')
+            .replace(/[-–—\s]+/g, '')
+            .trim()
+}
+
+function getClubName(item) {
+  if (!item) return ''
+  let title = (item.title || '').trim()
+  title = title.replace(/\s*\([^)]*\)/g, '').trim()
+  return title || item.title
+}
+
+const expandedCategories = ref({})
+
+watch(() => props.selectedCategory, (newCat) => {
+  if (newCat) {
+    expandedCategories.value[normalizeKey(newCat)] = true
+  }
+}, { immediate: true })
+
+const displayCategories = computed(() => {
+  const allActivities = props.activities || []
+
+  // Группируем все кружки по нормализованным ключам категорий
+  const activitiesByCatKey = {}
+
+  allActivities.forEach(item => {
+    const rawCat = (item.category || '').trim()
+    if (!rawCat) return
+
+    const normKey = normalizeKey(rawCat)
+    if (!activitiesByCatKey[normKey]) {
+      activitiesByCatKey[normKey] = {
+        catName: rawCat.replace(/^#/, '').trim(),
+        clubs: {},
+        totalCount: 0
+      }
+    }
+
+    const clubName = getClubName(item) || item.title || 'Кружок'
+    activitiesByCatKey[normKey].totalCount += 1
+    activitiesByCatKey[normKey].clubs[clubName] = (activitiesByCatKey[normKey].clubs[clubName] || 0) + 1
+  })
+
+  const knownNormKeys = new Set()
+
+  const list = categories.value.map(cat => {
+    const normKey = normalizeKey(cat.name)
+    knownNormKeys.add(normKey)
+
+    const catData = activitiesByCatKey[normKey]
+    
+    let subItems = []
+    let totalCount = 0
+
+    if (catData) {
+      totalCount = catData.totalCount
+      subItems = Object.keys(catData.clubs).map(clubName => ({
+        name: clubName,
+        count: catData.clubs[clubName]
+      }))
+    }
+
+    return {
+      ...cat,
+      expanded: !!expandedCategories.value[normKey],
+      count: totalCount,
+      subItems: subItems
+    }
+  })
+
+  // Добавляем категории из базы данных, которых нет в предустановленном списке
+  Object.keys(activitiesByCatKey).forEach(normKey => {
+    if (!knownNormKeys.has(normKey)) {
+      const catData = activitiesByCatKey[normKey]
+      const subItems = Object.keys(catData.clubs).map(clubName => ({
+        name: clubName,
+        count: catData.clubs[clubName]
+      }))
+
+      list.push({
+        name: catData.catName,
+        expanded: !!expandedCategories.value[normKey],
+        count: catData.totalCount,
+        subItems: subItems
+      })
+    }
+  })
+
+  return list
+})
+
+function getImageUrl(path) {
+  if (!path) return ''
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
+    return path
+  }
+  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
+  return base + path.replace(/^\//, '')
+}
+
 function toggleDropdown() {
   isDropdownOpen.value = !isDropdownOpen.value
 }
@@ -175,14 +275,27 @@ function emitGenderChange() {
   emit('update:gender', { male: genderMale.value, female: genderFemale.value })
 }
 
-function toggleCategory(category) {
-  category.expanded = !category.expanded
+function toggleCategory(cat) {
+  const normKey = normalizeKey(cat.name)
+  const isCurrentlyExpanded = !!expandedCategories.value[normKey]
+  expandedCategories.value[normKey] = !isCurrentlyExpanded
+
+  if (!isCurrentlyExpanded) {
+    emit('selectCategory', { category: cat.name, subCategory: null })
+  } else {
+    if (props.selectedCategory === cat.name) {
+      emit('selectCategory', { category: null, subCategory: null })
+    }
+  }
 }
 
 function selectSubCategory(category, subCategory) {
-  emit('selectCategory', { category: category.name, subCategory: subCategory.name })
+  if (props.selectedSubCategory === subCategory.name) {
+    emit('selectCategory', { category: category.name, subCategory: null })
+  } else {
+    emit('selectCategory', { category: category.name, subCategory: subCategory.name })
+  }
 }
-
 
 function handleClickOutside(event) {
   if (dropdownRef.value && !dropdownRef.value.contains(event.target)) {
@@ -193,6 +306,7 @@ function handleClickOutside(event) {
 onMounted(() => {
   window.addEventListener('click', handleClickOutside)
 })
+
 onBeforeUnmount(() => {
   window.removeEventListener('click', handleClickOutside)
 })

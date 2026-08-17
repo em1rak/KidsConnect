@@ -1,7 +1,11 @@
 <template>
   <article class="card">
     <div class="card-image">
-      <img :src="getImageUrl(item.image || '/image/Group330.svg')" alt="Preview" />
+      <img 
+        :src="getImageUrl(item.image || '/image/Group330.svg')" 
+        @error="$event.target.src = getImageUrl('/image/Group330.svg')" 
+        alt="Preview" 
+      />
     </div>
     <div class="card-content">
       <div class="card-header">
@@ -31,25 +35,20 @@
         <p v-if="item.hashtag" class="hashtag">{{ item.hashtag }}</p>
 
         <p v-if="item.age" class="info-row">
-          <img src="/image/Frame397.svg" class="icon" alt="age" /> {{ item.age }}
+          <img :src="getImageUrl('/image/Frame397.svg')" class="icon" alt="age" /> {{ item.age }}
         </p>
 
         <p v-if="item.address" class="info-row">
-          <img src="/image/layer1.svg" class="icon" alt="address" /> {{ item.address }}
+          <img :src="getImageUrl('/image/layer1.svg')" class="icon" alt="address" /> {{ item.address }}
         </p>
 
-        <a 
-          v-if="item.place" 
-          :href="item.placeUrl || 'https://posleurokov.ru/irkutsk/61894'" 
-          target="_blank" 
-          class="place-link info-row"
-        >
-          <img src="/image/Group.svg" class="icon" alt="place" /> {{ item.place }}
-        </a>
+        <p v-if="item.place" class="info-row">
+          <img :src="getImageUrl('/image/Group.svg')" class="icon" alt="place" /> {{ item.place }}
+        </p>
 
         <div v-if="item.schedule" class="schedule-row">
           <div class="schedule-days">
-            <img src="/image/clock_time_icon_1429031.svg" class="icon" alt="clock" />
+            <img :src="getImageUrl('/image/clock_time_icon_1429031.svg')" class="icon" alt="clock" />
             <span>{{ item.schedule.days }}</span>
           </div>
           <span 
@@ -62,7 +61,7 @@
         </div>
       </div>
 
-      <router-link :to="item.detailUrl || '/detail'" class="btn-more">
+      <router-link :to="item.detailUrl || (item.id ? `/detail?id=${item.id}` : '/detail')" class="btn-more">
         Подробнее
       </router-link>
     </div>
@@ -79,7 +78,14 @@ defineProps({
 
 
 function getImageUrl(path) {
-  if (!path) return ''
-  return import.meta.env.BASE_URL + path.replace(/^\//, '')
+  if (!path) return import.meta.env.BASE_URL + 'image/Group330.svg'
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
+    return path
+  }
+  if (path.startsWith('/uploads/') || path.startsWith('uploads/') || path.startsWith('/media/') || path.startsWith('media/')) {
+    return 'http://127.0.0.1:8000/' + path.replace(/^\//, '')
+  }
+  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
+  return base + path.replace(/^\//, '')
 }
 </script>
