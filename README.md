@@ -19,20 +19,20 @@ KidsConnect
 
 1. Откройте терминал и перейдите в папку бэкенда:
 ```bash
-   cd backend
+cd backend
 ```
 2. активируйте виртуальное окружение:
 ```bash
-   python -m venv venv
-   .venv\Scripts\activate 
+python -m venv venv
+.venv\Scripts\activate 
 ```
 3. установите зависимости:
 ```bash
-   pip install fastapi uvicorn sqlalchemy pydantic python-multipart
+pip install -r requirements.txt
 ```
 4. запустите сервер:
 ```bash
-   uvicorn main:app --reload
+uvicorn main:app --reload
 ```
 
 Бэкенд запустится на http://localhost:8000. Интерактивная документация (Swagger) доступна по адресу http://localhost:8000/docs.
@@ -41,11 +41,11 @@ KidsConnect
 ## Шаг 2: Запуск Frontend (Клиент)
 1. Откройте новое окно терминала и перейдите в папку фронтенда:
 ```bash
-   npm install
+npm install
 ```
 2. запустите клиент:
 ```bash 
-   npm run dev
+npm run dev
 ```
 Фронтенд запустится на http://localhost:5173.
 
