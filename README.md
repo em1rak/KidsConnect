@@ -24,7 +24,7 @@ cd backend
 2. активируйте виртуальное окружение:
 ```bash
 python -m venv venv
-.venv\Scripts\activate 
+venv\Scripts\activate 
 ```
 3. установите зависимости:
 ```bash

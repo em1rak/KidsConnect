@@ -203,5 +203,59 @@ export default {
       throw new Error(data.detail || 'Не удалось удалить кружок');
     }
     return data;
+  },
+
+  // Получить отзывы к конкретному кружку
+  async getReviews(activityId) {
+    const response = await fetch(`${BASE_URL}/activities/${activityId}/reviews`);
+    if (!response.ok) throw new Error('Не удалось загрузить отзывы');
+    return await response.json();
+  },
+
+  // Оставить отзыв к кружку
+  async createReview(reviewData) {
+    const response = await fetch(`${BASE_URL}/reviews/`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(reviewData)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || 'Не удалось оставить отзыв');
+    }
+    return data;
+  },
+
+  // Получить рекомендации по возрасту и категории
+  async getRecommendations(age, category) {
+    const params = new URLSearchParams();
+    if (age !== undefined && age !== null && age !== '') params.append('age', age);
+    if (category) params.append('category', category);
+
+    const response = await fetch(`${BASE_URL}/recommendations/?${params.toString()}`);
+    if (!response.ok) throw new Error('Не удалось загрузить рекомендации');
+    return await response.json();
+  },
+
+  // Получить уведомления текущего пользователя
+  async getNotifications() {
+    const response = await fetch(`${BASE_URL}/notifications/`, {
+      headers: getAuthHeaders()
+    });
+    if (!response.ok) throw new Error('Не удалось загрузить уведомления');
+    return await response.json();
+  },
+
+  // Отметить уведомление как прочитанное
+  async markNotificationRead(notificationId) {
+    const response = await fetch(`${BASE_URL}/notifications/${notificationId}/read`, {
+      method: 'PATCH',
+      headers: getAuthHeaders()
+    });
+    if (!response.ok) throw new Error('Не удалось обновить статус уведомления');
+    return await response.json();
   }
-};
+};
+
+
+

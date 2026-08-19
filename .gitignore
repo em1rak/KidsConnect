@@ -1,8 +1,9 @@
 node_modules/
 dist/
-__pycache__/
 venv/
+.venv/
+__pycache__/
 .pytest_cache/
-*.db
-backend/uploads/
-uploads/
+.agents/
+.vscode/
+.idea/

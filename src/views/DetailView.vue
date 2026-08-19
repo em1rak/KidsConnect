@@ -172,9 +172,111 @@
       </div>
     </section>
 
+    <!-- Секция Отзывы -->
+    <section class="detail-section reviews-section">
+      <h2 class="section-title">ОТЗЫВЫ</h2>
+
+      <!-- Форма добавления отзыва (доступна только авторизованным, если отзыв еще не оставлен) -->
+      <div v-if="authStore.isAuthenticated.value">
+        <div v-if="hasUserReviewed" class="already-reviewed-box">
+          <p>Вы уже оставили отзыв к этому кружку.</p>
+        </div>
+
+        <div v-else class="add-review-box">
+          <h3 class="add-review-title">Оставить отзыв</h3>
+          <form @submit.prevent="submitReview" class="review-form">
+            <div class="rating-picker">
+              <span class="rating-label">Оценка:</span>
+              <div class="stars-selectable">
+                <button 
+                  v-for="star in 5" 
+                  :key="star" 
+                  type="button" 
+                  class="star-btn"
+                  @click="newReview.rating = star"
+                  :aria-label="`Оценка ${star}`"
+                >
+                  <svg width="22" height="22" viewBox="0 0 24 24" :fill="star <= newReview.rating ? '#FFB800' : '#E5E7EB'" stroke="#FFB800" stroke-width="1.5">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <textarea 
+                v-model="newReview.text" 
+                class="form-input review-textarea" 
+                rows="3" 
+                placeholder="Поделитесь вашим впечатлением о занятиях в кружке..." 
+                required
+              ></textarea>
+            </div>
+
+            <div v-if="reviewError" class="error-banner">
+              {{ reviewError }}
+            </div>
+
+            <div v-if="reviewSuccess" class="success-banner-inline">
+              {{ reviewSuccess }}
+            </div>
+
+            <button type="submit" class="btn-submit" :disabled="isSubmittingReview">
+              {{ isSubmittingReview ? 'Публикация...' : 'Отправить отзыв' }}
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Приглашение к авторизации, если пользователь не авторизован -->
+      <div v-else class="auth-prompt-box">
+        <p>Войдите в систему, чтобы оставить отзыв о кружке.</p>
+        <router-link to="/auth" class="btn-auth-link">Войти</router-link>
+      </div>
+
+
+      <!-- Список отзывов -->
+      <div class="reviews-list">
+        <div v-if="loadingReviews" class="reviews-loading">
+          Загрузка отзывов...
+        </div>
+
+        <div v-else-if="reviews.length === 0" class="no-reviews">
+          Отзывов пока нет. Будьте первым, кто оставит отзыв!
+        </div>
+
+        <div v-else class="reviews-grid">
+          <div v-for="rev in reviews" :key="rev.id" class="review-card">
+            <div class="review-header">
+              <div class="author-info">
+                <span class="author-name">{{ rev.user?.name || 'Родитель' }}</span>
+                <span class="review-date">{{ rev.created_at || '' }}</span>
+              </div>
+              <div class="stars-display">
+                <svg 
+                  v-for="star in 5" 
+                  :key="star" 
+                  width="16" 
+                  height="16" 
+                  viewBox="0 0 24 24" 
+                  :fill="star <= rev.rating ? '#FFB800' : '#E5E7EB'" 
+                  stroke="#FFB800" 
+                  stroke-width="1.5"
+                >
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+              </div>
+            </div>
+            <p class="review-text">{{ rev.text }}</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Модальное окно записи -->
     <transition name="fade">
       <div v-if="showModal" class="modal-backdrop" @click.self="showModal = false">
+
         <div class="modal-card">
           <div class="modal-header">
             <h3 class="modal-title">Запись в кружок</h3>
@@ -302,6 +404,65 @@ const parsedSchedule = computed(() => {
   }
 })
 
+// Переменные отзывов
+const reviews = ref([])
+const loadingReviews = ref(true)
+
+// Проверка: оставлял ли текущий пользователь уже отзыв
+const hasUserReviewed = computed(() => {
+  if (!authStore.isAuthenticated.value || !authStore.user.value) return false
+  const currentUserId = authStore.user.value.id
+  return reviews.value.some(r => r.user_id === currentUserId || r.user?.id === currentUserId)
+})
+
+const newReview = reactive({
+  rating: 5,
+  text: ''
+})
+
+const isSubmittingReview = ref(false)
+const reviewError = ref('')
+const reviewSuccess = ref('')
+
+async function loadReviews() {
+  loadingReviews.value = true
+  try {
+    const list = await api.getReviews(activity.value?.id || activityId)
+    reviews.value = list || []
+  } catch (e) {
+    console.warn('Ошибка при загрузке отзывов:', e)
+    reviews.value = []
+  } finally {
+    loadingReviews.value = false
+  }
+}
+
+async function submitReview() {
+  if (!newReview.text.trim()) {
+    reviewError.value = 'Пожалуйста, введите текст отзыва'
+    return
+  }
+  isSubmittingReview.value = true
+  reviewError.value = ''
+  reviewSuccess.value = ''
+  try {
+    const reviewData = {
+      rating: newReview.rating,
+      text: newReview.text.trim(),
+      activity_id: activity.value?.id || activityId
+    }
+    await api.createReview(reviewData)
+    newReview.text = ''
+    newReview.rating = 5
+    reviewSuccess.value = 'Ваш отзыв успешно опубликован!'
+    await loadReviews()
+  } catch (err) {
+    reviewError.value = err.message || 'Не удалось отправить отзыв'
+  } finally {
+    isSubmittingReview.value = false
+  }
+}
+
 onMounted(async () => {
   try {
     activity.value = await api.getActivityById(activityId)
@@ -310,7 +471,9 @@ onMounted(async () => {
   } finally {
     loadingActivity.value = false
   }
+  await loadReviews()
 })
+
 
 function getImageUrl(path) {
   if (!path) return import.meta.env.BASE_URL + 'image/Group330.svg'
@@ -553,4 +716,176 @@ async function submitBooking() {
   font-size: 13px;
   margin-top: 12px;
 }
+
+/* Стили блока отзывов */
+.add-review-box {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+
+.add-review-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  margin-bottom: 14px;
+  margin-top: 0;
+}
+
+.rating-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.rating-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.stars-selectable {
+  display: flex;
+  gap: 4px;
+}
+
+.star-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s ease;
+}
+
+.star-btn:hover {
+  transform: scale(1.15);
+}
+
+.review-textarea {
+  resize: vertical;
+  min-height: 80px;
+  width: 100%;
+}
+
+.auth-prompt-box {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 20px;
+  text-align: center;
+  margin-bottom: 24px;
+  border: 1px dashed #d1d5db;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-prompt-box p {
+  color: #666666;
+  font-size: 14px;
+  margin: 0;
+}
+
+.btn-auth-link {
+  display: inline-block;
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  padding: 8px 18px;
+  border-radius: 5px;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.reviews-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.review-card {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 16px 20px;
+  border: 1px solid #e5e7eb;
+}
+
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.author-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.author-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-main, #333333);
+}
+
+.review-date {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.stars-display {
+  display: flex;
+  gap: 2px;
+}
+
+.review-text {
+  font-size: 14px;
+  color: var(--text-main, #4b5563);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.no-reviews, .reviews-loading {
+  padding: 24px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 14px;
+  background: #ffffff;
+  border-radius: 5px;
+  border: 1px solid #e5e7eb;
+}
+
+.success-banner-inline {
+  color: #065f46;
+  background: #d1fae5;
+  padding: 10px 14px;
+  border-radius: 5px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.already-reviewed-box {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+  border-left: 3px solid var(--primary-dark, #70232f);
+  border-top: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.already-reviewed-box p {
+  color: var(--text-main, #333333);
+  font-weight: 500;
+  font-size: 14px;
+  margin: 0;
+}
 </style>
+

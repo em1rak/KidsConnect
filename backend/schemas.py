@@ -80,4 +80,38 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+# --- ОТЗЫВЫ ---
+class ReviewCreate(BaseModel):
+    rating: int
+    text: str
+    activity_id: int
+
+class ReviewResponse(BaseModel):
+    id: int
+    rating: int
+    text: str
+    created_at: Optional[str] = None
+    user_id: int
+    activity_id: int
+    user: Optional[UserResponse] = None
+
+    class Config:
+        from_attributes = True
+
+# --- УВЕДОМЛЕНИЯ ---
+class NotificationResponse(BaseModel):
+    id: int
+    text: str
+    is_read: bool
+    created_at: Optional[str] = None
+    user_id: int
+
+    class Config:
+        from_attributes = True
+
+class NotificationUpdate(BaseModel):
+    is_read: bool
+
+
 

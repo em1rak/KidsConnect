@@ -59,4 +59,30 @@ class User(Base):
     role = Column(String, default="parent")  # "parent" (Родитель) или "leader" (Руководитель кружка)
     hashed_password = Column(String, nullable=False)
     token = Column(String, nullable=True, index=True)
+
+class Review(Base):
+    __tablename__ = "reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rating = Column(Integer, nullable=False)  # Оценка (от 1 до 5)
+    text = Column(String, nullable=False)     # Текст отзыва
+    created_at = Column(String, nullable=True) # Дата создания
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+    activity = relationship("Activity", foreign_keys=[activity_id])
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    text = Column(String, nullable=False)        # Текст уведомления
+    is_read = Column(Boolean, default=False)    # Прочитано или нет
+    created_at = Column(String, nullable=True)  # Дата отправки
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
 

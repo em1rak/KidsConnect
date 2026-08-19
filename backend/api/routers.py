@@ -4,6 +4,7 @@ from typing import List, Optional
 from datetime import datetime
 import shutil
 import uuid
+import re
 from db import models
 import schemas
 from db.database import get_db
@@ -144,13 +145,9 @@ def get_activity_by_id(activity_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Кружок не найден")
     return activity
 
-def send_notification(phone: str, child_name: str, activity_title: str):
-    print(f"[УВЕДОМЛЕНИЕ] СМС на номер {phone}: Заявка для {child_name} на '{activity_title}' принята!")
-
 @router.post("/bookings/", response_model=schemas.BookingResponse)
 def create_booking(
     booking: schemas.BookingCreate, 
-    background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
@@ -170,9 +167,42 @@ def create_booking(
     db.commit()
     db.refresh(db_booking)
     
-    background_tasks.add_task(send_notification, booking.phone, booking.child_name, activity.title)
-    
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # 1. Уведомление для родителя
+    parent_user_id = db_booking.user_id
+    if not parent_user_id and db_booking.phone:
+        user_by_phone = db.query(models.User).filter(models.User.phone == db_booking.phone).first()
+        if user_by_phone:
+            parent_user_id = user_by_phone.id
+
+    if parent_user_id:
+        db.add(models.Notification(
+            text=f"Заявка для ребенка {booking.child_name} на кружок '{activity.title}' успешно отправлена.",
+            is_read=False,
+            created_at=now_str,
+            user_id=parent_user_id
+        ))
+
+    # 2. Уведомление для руководителя(ей) кружка
+    leader_ids = []
+    if activity.owner_id:
+        leader_ids.append(activity.owner_id)
+    else:
+        all_leaders = db.query(models.User).filter(models.User.role == "leader").all()
+        leader_ids = [l.id for l in all_leaders]
+
+    for lid in leader_ids:
+        db.add(models.Notification(
+            text=f"Новая заявка на кружок '{activity.title}': {booking.child_name} (тел: {booking.phone}).",
+            is_read=False,
+            created_at=now_str,
+            user_id=lid
+        ))
+
+    db.commit()
     return db_booking
+
 
 # --- УПРАВЛЕНИЕ ЗАЯВКАМИ И ИСТОРИЯ ---
 @router.get("/bookings/my", response_model=List[schemas.BookingResponse])
@@ -262,9 +292,33 @@ def update_booking_status(
     db.refresh(booking)
     
     activity_title = booking.activity.title if booking.activity else "Кружок"
-    print(f"[ИЗМЕНЕНИЕ СТАТУСА] Заявка #{booking.id} ({booking.child_name}) переведена в статус '{booking.status}'")
     
+    # Отправка уведомления родителю об изменении статуса (Принято / Отклонено)
+    parent_user_id = booking.user_id
+    if not parent_user_id and booking.phone:
+        user_by_phone = db.query(models.User).filter(models.User.phone == booking.phone).first()
+        if user_by_phone:
+            parent_user_id = user_by_phone.id
+
+    if parent_user_id:
+        if booking.status == "Принято":
+            status_msg = f"Ваша заявка на кружок '{activity_title}' для {booking.child_name} принята!"
+        elif booking.status == "Отклонено":
+            status_msg = f"Ваша заявка на кружок '{activity_title}' для {booking.child_name} отклонена."
+        else:
+            status_msg = f"Статус вашей заявки на кружок '{activity_title}' для {booking.child_name} изменен на '{booking.status}'."
+            
+        db_notification = models.Notification(
+            text=status_msg,
+            is_read=False,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            user_id=parent_user_id
+        )
+        db.add(db_notification)
+        db.commit()
+
     return booking
+
 
 @router.put("/activities/{activity_id}", response_model=schemas.ActivityResponse)
 def update_activity(
@@ -313,4 +367,118 @@ def delete_activity(
     db.query(models.Booking).filter(models.Booking.activity_id == activity_id).delete()
     db.delete(activity)
     db.commit()
-    return {"message": "Кружок успешно удален"}
+    return {"message": "Кружок успешно удален"}
+
+# --- ОТЗЫВЫ ---
+@router.post("/reviews/", response_model=schemas.ReviewResponse)
+def create_review(
+    review: schemas.ReviewCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if review.rating < 1 or review.rating > 5:
+        raise HTTPException(status_code=400, detail="Оценка должна быть от 1 до 5")
+    
+    activity = db.query(models.Activity).filter(models.Activity.id == review.activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Кружок не найден")
+    
+    # Проверка: пользователь может выставить только 1 отзыв к кружку
+    existing_review = db.query(models.Review).filter(
+        models.Review.user_id == current_user.id,
+        models.Review.activity_id == review.activity_id
+    ).first()
+    if existing_review:
+        raise HTTPException(status_code=400, detail="Вы уже оставили отзыв к этому кружку")
+
+    review_dict = review.model_dump()
+
+    review_dict["user_id"] = current_user.id
+    review_dict["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    db_review = models.Review(**review_dict)
+    db.add(db_review)
+    db.commit()
+    db.refresh(db_review)
+    return db_review
+
+@router.get("/activities/{activity_id}/reviews", response_model=List[schemas.ReviewResponse])
+def get_activity_reviews(activity_id: int, db: Session = Depends(get_db)):
+    activity = db.query(models.Activity).filter(models.Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Кружок не найден")
+    
+    reviews = db.query(models.Review).filter(models.Review.activity_id == activity_id).order_by(models.Review.id.desc()).all()
+    return reviews
+
+# --- РЕКОМЕНДАЦИИ ---
+def is_age_in_group(age_group: Optional[str], target_age: int) -> bool:
+    # Проверка соответствия возраста диапазону
+    if not age_group:
+        return True
+    if str(target_age) in age_group:
+        return True
+    numbers = [int(n) for n in re.findall(r'\d+', age_group)]
+    if not numbers:
+        return True
+    if ("от" in age_group.lower() or "+" in age_group) and len(numbers) == 1:
+        return target_age >= numbers[0]
+    if "до" in age_group.lower() and len(numbers) == 1:
+        return target_age <= numbers[0]
+    if len(numbers) >= 2:
+        return numbers[0] <= target_age <= numbers[1]
+    if len(numbers) == 1:
+        return target_age == numbers[0]
+    return False
+
+@router.get("/recommendations/", response_model=List[schemas.ActivityResponse])
+def get_recommendations(
+    age: Optional[int] = None,
+    category: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Activity)
+    
+    # Фильтр по категории
+    if category and category.strip():
+        query = query.filter(models.Activity.category.ilike(f"%{category.strip()}%"))
+        
+    activities = query.all()
+    
+    # Фильтр по возрасту
+    if age is not None:
+        activities = [act for act in activities if is_age_in_group(act.age_group, age)]
+        
+    return activities
+
+# --- УВЕДОМЛЕНИЯ ---
+@router.get("/notifications/", response_model=List[schemas.NotificationResponse])
+def get_notifications(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return db.query(models.Notification).filter(
+        models.Notification.user_id == current_user.id
+    ).order_by(models.Notification.id.desc()).all()
+
+@router.patch("/notifications/{notification_id}/read", response_model=schemas.NotificationResponse)
+def mark_notification_read(
+    notification_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    notif = db.query(models.Notification).filter(
+        models.Notification.id == notification_id,
+        models.Notification.user_id == current_user.id
+    ).first()
+    if not notif:
+        raise HTTPException(status_code=404, detail="Уведомление не найдено")
+    
+    notif.is_read = True
+    db.commit()
+    db.refresh(notif)
+    return notif
+
+
+
+
