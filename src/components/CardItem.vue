@@ -69,23 +69,12 @@
 </template>
 
 <script setup>
+import { getImageUrl } from '../utils'
+
 defineProps({
   item: {
     type: Object,
     required: true
   }
 })
-
-
-function getImageUrl(path) {
-  if (!path) return import.meta.env.BASE_URL + 'image/Group330.svg'
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
-    return path
-  }
-  if (path.startsWith('/uploads/') || path.startsWith('uploads/') || path.startsWith('/media/') || path.startsWith('media/')) {
-    return 'http://127.0.0.1:8000/' + path.replace(/^\//, '')
-  }
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
-  return base + path.replace(/^\//, '')
-}
 </script>

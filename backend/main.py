@@ -32,9 +32,15 @@ def run_migrations():
             if "teacher_name" not in columns:
                 conn.execute(text("ALTER TABLE activities ADD COLUMN teacher_name TEXT"))
                 conn.commit()
+            if "total_spots" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN total_spots INTEGER DEFAULT 20"))
+                conn.commit()
             if "spots_info" not in columns:
                 conn.execute(text("ALTER TABLE activities ADD COLUMN spots_info TEXT"))
                 conn.commit()
+            # Обновляем total_spots для существующих записей, если они NULL
+            conn.execute(text("UPDATE activities SET total_spots = 20 WHERE total_spots IS NULL"))
+            conn.commit()
             if "duration" not in columns:
                 conn.execute(text("ALTER TABLE activities ADD COLUMN duration TEXT"))
                 conn.commit()

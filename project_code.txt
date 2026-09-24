@@ -1,0 +1,5997 @@
+﻿----- routers.py -----
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from datetime import datetime
+import shutil
+import uuid
+import re
+from db import models
+import schemas
+from db.database import get_db
+from auth_utils import hash_password, verify_password, generate_token
+
+router = APIRouter()
+
+# --- Р’РЎРџРћРњРћР“РђРўР•Р›Р¬РќР«Р• Р¤РЈРќРљР¦РР РђР’РўРћР РР—РђР¦РР ---
+def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> models.User:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="РўСЂРµР±СѓРµС‚СЃСЏ Р°РІС‚РѕСЂРёР·Р°С†РёСЏ")
+    token = authorization.split(" ")[1]
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="РќРµРґРµР№СЃС‚РІРёС‚РµР»СЊРЅС‹Р№ РёР»Рё РёСЃС‚РµРєС€РёР№ С‚РѕРєРµРЅ")
+    return user
+
+def get_optional_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> Optional[models.User]:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.split(" ")[1]
+    return db.query(models.User).filter(models.User.token == token).first()
+
+# --- РђР’РўРћР РР—РђР¦РРЇ Р РџРћР›Р¬Р—РћР’РђРўР•Р›Р ---
+@router.post("/auth/register", response_model=schemas.TokenResponse)
+def register(user_data: schemas.UserRegister, db: Session = Depends(get_db)):
+    email = user_data.email.strip().lower()
+    existing_user = db.query(models.User).filter(models.User.email == email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃ С‚Р°РєРёРј e-mail СѓР¶Рµ Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅ")
+    
+    token = generate_token()
+    hashed_pwd = hash_password(user_data.password)
+    
+    role_val = user_data.role if user_data.role in ["parent", "leader"] else "parent"
+    
+    new_user = models.User(
+        name=user_data.name.strip(),
+        email=email,
+        phone=user_data.phone.strip() if user_data.phone else None,
+        role=role_val,
+        hashed_password=hashed_pwd,
+        token=token
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": new_user
+    }
+
+@router.post("/auth/login", response_model=schemas.TokenResponse)
+def login(login_data: schemas.UserLogin, db: Session = Depends(get_db)):
+    login_str = login_data.login.strip()
+    user = db.query(models.User).filter(
+        (models.User.email == login_str.lower()) | (models.User.phone == login_str)
+    ).first()
+    
+    if not user or not verify_password(login_data.password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="РќРµРІРµСЂРЅС‹Р№ Р»РѕРіРёРЅ (e-mail/С‚РµР»РµС„РѕРЅ) РёР»Рё РїР°СЂРѕР»СЊ")
+    
+    token = generate_token()
+    user.token = token
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": user
+    }
+
+@router.get("/auth/me", response_model=schemas.UserResponse)
+def get_me(current_user: models.User = Depends(get_current_user)):
+    return current_user
+
+@router.post("/auth/logout")
+def logout(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    current_user.token = None
+    db.commit()
+    return {"message": "РЈСЃРїРµС€РЅС‹Р№ РІС‹С…РѕРґ РёР· СЃРёСЃС‚РµРјС‹"}
+
+# --- Р—РђР“Р РЈР—РљРђ Р¤РђР™Р›РћР’ ---
+@router.post("/upload/")
+def upload_image(file: UploadFile = File(...)):
+    # Р’С‹С‚Р°СЃРєРёРІР°РµРј СЂР°СЃС€РёСЂРµРЅРёРµ С„Р°Р№Р»Р° (РЅР°РїСЂРёРјРµСЂ, .jpg РёР»Рё .png)
+    file_extension = file.filename.split(".")[-1]
+    
+    # РЎРѕР·РґР°РµРј СѓРЅРёРєР°Р»СЊРЅРѕРµ РёРјСЏ (РЅР°РїСЂРёРјРµСЂ, 550e8400-e29b-41d4-a716-446655440000.jpg)
+    file_name = f"{uuid.uuid4()}.{file_extension}"
+    file_path = f"uploads/{file_name}"
+    
+    # РЎРѕС…СЂР°РЅСЏРµРј С„Р°Р№Р» РЅР° Р¶РµСЃС‚РєРёР№ РґРёСЃРє
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    return {"image_url": f"/{file_path}"}
+
+# --- РљР РЈР–РљР Р Р—РђРџРРЎР¬ ---
+@router.post("/activities/", response_model=schemas.ActivityResponse)
+def create_activity(
+    activity: schemas.ActivityCreate, 
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_current_user)
+):
+    activity_dict = activity.model_dump()
+    if current_user and current_user.role == "leader":
+        activity_dict["owner_id"] = current_user.id
+
+    db_activity = models.Activity(**activity_dict)
+    db.add(db_activity)
+    db.commit()
+    db.refresh(db_activity)
+    return db_activity
+
+@router.get("/activities/", response_model=List[schemas.ActivityResponse])
+def get_activities(
+    category: Optional[str] = None, 
+    is_free: Optional[bool] = None, 
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Activity)
+    if category:
+        query = query.filter(models.Activity.category == category)
+    if is_free is not None:
+        query = query.filter(models.Activity.is_free == is_free)
+    
+    return query.all()
+
+@router.get("/activities/{activity_id}", response_model=schemas.ActivityResponse)
+def get_activity_by_id(activity_id: int, db: Session = Depends(get_db)):
+    activity = db.query(models.Activity).filter(models.Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="РљСЂСѓР¶РѕРє РЅРµ РЅР°Р№РґРµРЅ")
+    return activity
+
+@router.post("/bookings/", response_model=schemas.BookingResponse)
+def create_booking(
+    booking: schemas.BookingCreate, 
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_current_user)
+):
+    activity = db.query(models.Activity).filter(models.Activity.id == booking.activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Р’С‹Р±СЂР°РЅРЅС‹Р№ РєСЂСѓР¶РѕРє РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚")
+    
+    booking_dict = booking.model_dump()
+    if current_user and not booking_dict.get("user_id"):
+        booking_dict["user_id"] = current_user.id
+    
+    if not booking_dict.get("created_at"):
+        booking_dict["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+    db_booking = models.Booking(**booking_dict)
+    db.add(db_booking)
+    db.commit()
+    db.refresh(db_booking)
+    
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # 1. РЈРІРµРґРѕРјР»РµРЅРёРµ РґР»СЏ СЂРѕРґРёС‚РµР»СЏ
+    parent_user_id = db_booking.user_id
+    if not parent_user_id and db_booking.phone:
+        user_by_phone = db.query(models.User).filter(models.User.phone == db_booking.phone).first()
+        if user_by_phone:
+            parent_user_id = user_by_phone.id
+
+    if parent_user_id:
+        db.add(models.Notification(
+            text=f"Р—Р°СЏРІРєР° РґР»СЏ СЂРµР±РµРЅРєР° {booking.child_name} РЅР° РєСЂСѓР¶РѕРє '{activity.title}' СѓСЃРїРµС€РЅРѕ РѕС‚РїСЂР°РІР»РµРЅР°.",
+            is_read=False,
+            created_at=now_str,
+            user_id=parent_user_id
+        ))
+
+    # 2. РЈРІРµРґРѕРјР»РµРЅРёРµ РґР»СЏ СЂСѓРєРѕРІРѕРґРёС‚РµР»СЏ(РµР№) РєСЂСѓР¶РєР°
+    leader_ids = []
+    if activity.owner_id:
+        leader_ids.append(activity.owner_id)
+    else:
+        all_leaders = db.query(models.User).filter(models.User.role == "leader").all()
+        leader_ids = [l.id for l in all_leaders]
+
+    for lid in leader_ids:
+        db.add(models.Notification(
+            text=f"РќРѕРІР°СЏ Р·Р°СЏРІРєР° РЅР° РєСЂСѓР¶РѕРє '{activity.title}': {booking.child_name} (С‚РµР»: {booking.phone}).",
+            is_read=False,
+            created_at=now_str,
+            user_id=lid
+        ))
+
+    db.commit()
+    return db_booking
+
+
+# --- РЈРџР РђР’Р›Р•РќРР• Р—РђРЇР’РљРђРњР Р РРЎРўРћР РРЇ ---
+@router.get("/bookings/my", response_model=List[schemas.BookingResponse])
+def get_my_bookings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Booking).filter(
+        (models.Booking.user_id == current_user.id) | 
+        ((models.Booking.phone == current_user.phone) & (models.Booking.user_id.is_(None)))
+    ).order_by(models.Booking.id.desc())
+    return query.all()
+
+@router.get("/leader/bookings", response_model=List[schemas.BookingResponse])
+def get_leader_bookings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "leader":
+        raise HTTPException(status_code=403, detail="Р”РѕСЃС‚СѓРїРЅРѕ С‚РѕР»СЊРєРѕ РґР»СЏ СЂСѓРєРѕРІРѕРґРёС‚РµР»РµР№")
+    
+    # РС‰РµРј РєСЂСѓР¶РєРё, РїСЂРёРЅР°РґР»РµР¶Р°С‰РёРµ РґР°РЅРЅРѕРјСѓ СЂСѓРєРѕРІРѕРґРёС‚РµР»СЋ (РёР»Рё РЅРµ Р·Р°РґРµР№СЃС‚РІРѕРІР°РЅРЅС‹Рµ РЅРёРєРµРј РґСЂСѓРіРёРј)
+    leader_activities = db.query(models.Activity).filter(
+        (models.Activity.owner_id == current_user.id) | (models.Activity.owner_id.is_(None))
+    ).all()
+    activity_ids = [a.id for a in leader_activities]
+    
+    if not activity_ids:
+        return []
+    
+    return db.query(models.Booking).filter(models.Booking.activity_id.in_(activity_ids)).order_by(models.Booking.id.desc()).all()
+
+@router.get("/leader/activities", response_model=List[schemas.ActivityResponse])
+def get_leader_activities(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "leader":
+        raise HTTPException(status_code=403, detail="Р”РѕСЃС‚СѓРїРЅРѕ С‚РѕР»СЊРєРѕ РґР»СЏ СЂСѓРєРѕРІРѕРґРёС‚РµР»РµР№")
+    
+    # РџСЂРёРІСЏР·С‹РІР°РµРј РєСЂСѓР¶РєРё Р±РµР· РІР»Р°РґРµР»СЊС†Р° Рє С‚РµРєСѓС‰РµРјСѓ СЂСѓРєРѕРІРѕРґРёС‚РµР»СЋ
+    unowned = db.query(models.Activity).filter(models.Activity.owner_id.is_(None)).all()
+    if unowned:
+        for act in unowned:
+            act.owner_id = current_user.id
+        db.commit()
+
+    return db.query(models.Activity).filter(models.Activity.owner_id == current_user.id).order_by(models.Activity.id.desc()).all()
+
+@router.get("/activities/{activity_id}/bookings", response_model=List[schemas.BookingResponse])
+def get_activity_bookings(
+    activity_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "leader":
+        raise HTTPException(status_code=403, detail="Р”РѕСЃС‚СѓРїРЅРѕ С‚РѕР»СЊРєРѕ РґР»СЏ СЂСѓРєРѕРІРѕРґРёС‚РµР»РµР№")
+    
+    activity = db.query(models.Activity).filter(models.Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="РљСЂСѓР¶РѕРє РЅРµ РЅР°Р№РґРµРЅ")
+        
+    bookings = db.query(models.Booking).filter(models.Booking.activity_id == activity_id).order_by(models.Booking.id.desc()).all()
+    return bookings
+
+@router.patch("/bookings/{booking_id}/status", response_model=schemas.BookingResponse)
+def update_booking_status(
+    booking_id: int,
+    status_update: schemas.BookingStatusUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "leader":
+        raise HTTPException(status_code=403, detail="Р”РѕСЃС‚СѓРїРЅРѕ С‚РѕР»СЊРєРѕ РґР»СЏ СЂСѓРєРѕРІРѕРґРёС‚РµР»РµР№")
+    
+    allowed_statuses = ["РћР¶РёРґР°РµС‚", "РџСЂРёРЅСЏС‚Рѕ", "РћС‚РєР»РѕРЅРµРЅРѕ"]
+    if status_update.status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"РќРµРґРѕРїСѓСЃС‚РёРјС‹Р№ СЃС‚Р°С‚СѓСЃ. Р Р°Р·СЂРµС€РµРЅРЅС‹Рµ СЃС‚Р°С‚СѓСЃС‹: {', '.join(allowed_statuses)}")
+    
+    booking = db.query(models.Booking).filter(models.Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Р—Р°СЏРІРєР° РЅРµ РЅР°Р№РґРµРЅР°")
+    
+    booking.status = status_update.status
+    db.commit()
+    db.refresh(booking)
+    
+    activity_title = booking.activity.title if booking.activity else "РљСЂСѓР¶РѕРє"
+    
+    # РћС‚РїСЂР°РІРєР° СѓРІРµРґРѕРјР»РµРЅРёСЏ СЂРѕРґРёС‚РµР»СЋ РѕР± РёР·РјРµРЅРµРЅРёРё СЃС‚Р°С‚СѓСЃР° (РџСЂРёРЅСЏС‚Рѕ / РћС‚РєР»РѕРЅРµРЅРѕ)
+    parent_user_id = booking.user_id
+    if not parent_user_id and booking.phone:
+        user_by_phone = db.query(models.User).filter(models.User.phone == booking.phone).first()
+        if user_by_phone:
+            parent_user_id = user_by_phone.id
+
+    if parent_user_id:
+        if booking.status == "РџСЂРёРЅСЏС‚Рѕ":
+            status_msg = f"Р’Р°С€Р° Р·Р°СЏРІРєР° РЅР° РєСЂСѓР¶РѕРє '{activity_title}' РґР»СЏ {booking.child_name} РїСЂРёРЅСЏС‚Р°!"
+        elif booking.status == "РћС‚РєР»РѕРЅРµРЅРѕ":
+            status_msg = f"Р’Р°С€Р° Р·Р°СЏРІРєР° РЅР° РєСЂСѓР¶РѕРє '{activity_title}' РґР»СЏ {booking.child_name} РѕС‚РєР»РѕРЅРµРЅР°."
+        else:
+            status_msg = f"РЎС‚Р°С‚СѓСЃ РІР°С€РµР№ Р·Р°СЏРІРєРё РЅР° РєСЂСѓР¶РѕРє '{activity_title}' РґР»СЏ {booking.child_name} РёР·РјРµРЅРµРЅ РЅР° '{booking.status}'."
+            
+        db_notification = models.Notification(
+            text=status_msg,
+            is_read=False,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            user_id=parent_user_id
+        )
+        db.add(db_notification)
+        db.commit()
+
+    return booking
+
+
+@router.put("/activities/{activity_id}", response_model=schemas.ActivityResponse)
+def update_activity(
+    activity_id: int,
+    activity_update: schemas.ActivityCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "leader":
+        raise HTTPException(status_code=403, detail="Р”РѕСЃС‚СѓРїРЅРѕ С‚РѕР»СЊРєРѕ РґР»СЏ СЂСѓРєРѕРІРѕРґРёС‚РµР»РµР№")
+    
+    activity = db.query(models.Activity).filter(models.Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="РљСЂСѓР¶РѕРє РЅРµ РЅР°Р№РґРµРЅ")
+    
+    if activity.owner_id and activity.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Р’С‹ РЅРµ СЏРІР»СЏРµС‚РµСЃСЊ РІР»Р°РґРµР»СЊС†РµРј СЌС‚РѕРіРѕ РєСЂСѓР¶РєР°")
+    
+    update_data = activity_update.model_dump()
+    # РЎРѕС…СЂР°РЅСЏРµРј РёСЃС‚РёРЅРЅРѕРіРѕ РІР»Р°РґРµР»СЊС†Р° РєСЂСѓР¶РєР°
+    update_data["owner_id"] = activity.owner_id or current_user.id
+
+    for field, value in update_data.items():
+        setattr(activity, field, value)
+    
+    db.commit()
+    db.refresh(activity)
+    return activity
+
+@router.delete("/activities/{activity_id}")
+def delete_activity(
+    activity_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "leader":
+        raise HTTPException(status_code=403, detail="Р”РѕСЃС‚СѓРїРЅРѕ С‚РѕР»СЊРєРѕ РґР»СЏ СЂСѓРєРѕРІРѕРґРёС‚РµР»РµР№")
+    
+    activity = db.query(models.Activity).filter(models.Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="РљСЂСѓР¶РѕРє РЅРµ РЅР°Р№РґРµРЅ")
+    
+    if activity.owner_id and activity.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Р’С‹ РЅРµ СЏРІР»СЏРµС‚РµСЃСЊ РІР»Р°РґРµР»СЊС†РµРј СЌС‚РѕРіРѕ РєСЂСѓР¶РєР°")
+    
+    db.query(models.Booking).filter(models.Booking.activity_id == activity_id).delete()
+    db.delete(activity)
+    db.commit()
+    return {"message": "РљСЂСѓР¶РѕРє СѓСЃРїРµС€РЅРѕ СѓРґР°Р»РµРЅ"}
+
+# --- РћРўР—Р«Р’Р« ---
+@router.post("/reviews/", response_model=schemas.ReviewResponse)
+def create_review(
+    review: schemas.ReviewCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if review.rating < 1 or review.rating > 5:
+        raise HTTPException(status_code=400, detail="РћС†РµРЅРєР° РґРѕР»Р¶РЅР° Р±С‹С‚СЊ РѕС‚ 1 РґРѕ 5")
+    
+    activity = db.query(models.Activity).filter(models.Activity.id == review.activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="РљСЂСѓР¶РѕРє РЅРµ РЅР°Р№РґРµРЅ")
+    
+    # РџСЂРѕРІРµСЂРєР°: РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕР¶РµС‚ РІС‹СЃС‚Р°РІРёС‚СЊ С‚РѕР»СЊРєРѕ 1 РѕС‚Р·С‹РІ Рє РєСЂСѓР¶РєСѓ
+    existing_review = db.query(models.Review).filter(
+        models.Review.user_id == current_user.id,
+        models.Review.activity_id == review.activity_id
+    ).first()
+    if existing_review:
+        raise HTTPException(status_code=400, detail="Р’С‹ СѓР¶Рµ РѕСЃС‚Р°РІРёР»Рё РѕС‚Р·С‹РІ Рє СЌС‚РѕРјСѓ РєСЂСѓР¶РєСѓ")
+
+    review_dict = review.model_dump()
+
+    review_dict["user_id"] = current_user.id
+    review_dict["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    db_review = models.Review(**review_dict)
+    db.add(db_review)
+    db.commit()
+    db.refresh(db_review)
+    return db_review
+
+@router.get("/activities/{activity_id}/reviews", response_model=List[schemas.ReviewResponse])
+def get_activity_reviews(activity_id: int, db: Session = Depends(get_db)):
+    activity = db.query(models.Activity).filter(models.Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="РљСЂСѓР¶РѕРє РЅРµ РЅР°Р№РґРµРЅ")
+    
+    reviews = db.query(models.Review).filter(models.Review.activity_id == activity_id).order_by(models.Review.id.desc()).all()
+    return reviews
+
+# --- Р Р•РљРћРњР•РќР”РђР¦РР ---
+def is_age_in_group(age_group: Optional[str], target_age: int) -> bool:
+    # РџСЂРѕРІРµСЂРєР° СЃРѕРѕС‚РІРµС‚СЃС‚РІРёСЏ РІРѕР·СЂР°СЃС‚Р° РґРёР°РїР°Р·РѕРЅСѓ
+    if not age_group:
+        return True
+    if str(target_age) in age_group:
+        return True
+    numbers = [int(n) for n in re.findall(r'\d+', age_group)]
+    if not numbers:
+        return True
+    if ("РѕС‚" in age_group.lower() or "+" in age_group) and len(numbers) == 1:
+        return target_age >= numbers[0]
+    if "РґРѕ" in age_group.lower() and len(numbers) == 1:
+        return target_age <= numbers[0]
+    if len(numbers) >= 2:
+        return numbers[0] <= target_age <= numbers[1]
+    if len(numbers) == 1:
+        return target_age == numbers[0]
+    return False
+
+@router.get("/recommendations/", response_model=List[schemas.ActivityResponse])
+def get_recommendations(
+    age: Optional[int] = None,
+    category: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Activity)
+    
+    # Р¤РёР»СЊС‚СЂ РїРѕ РєР°С‚РµРіРѕСЂРёРё
+    if category and category.strip():
+        query = query.filter(models.Activity.category.ilike(f"%{category.strip()}%"))
+        
+    activities = query.all()
+    
+    # Р¤РёР»СЊС‚СЂ РїРѕ РІРѕР·СЂР°СЃС‚Сѓ
+    if age is not None:
+        activities = [act for act in activities if is_age_in_group(act.age_group, age)]
+        
+    return activities
+
+# --- РЈР’Р•Р”РћРњР›Р•РќРРЇ ---
+@router.get("/notifications/", response_model=List[schemas.NotificationResponse])
+def get_notifications(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return db.query(models.Notification).filter(
+        models.Notification.user_id == current_user.id
+    ).order_by(models.Notification.id.desc()).all()
+
+@router.patch("/notifications/{notification_id}/read", response_model=schemas.NotificationResponse)
+def mark_notification_read(
+    notification_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    notif = db.query(models.Notification).filter(
+        models.Notification.id == notification_id,
+        models.Notification.user_id == current_user.id
+    ).first()
+    if not notif:
+        raise HTTPException(status_code=404, detail="РЈРІРµРґРѕРјР»РµРЅРёРµ РЅРµ РЅР°Р№РґРµРЅРѕ")
+    
+    notif.is_read = True
+    db.commit()
+    db.refresh(notif)
+    return notif
+
+
+
+
+
+----- database.py -----
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(BASE_DIR, "kidsconnect.db")
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+----- models.py -----
+from sqlalchemy import Column, Integer, String, Boolean, Float, ForeignKey
+from sqlalchemy.orm import relationship
+from .database import Base
+
+class Activity(Base):
+    __tablename__ = "activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, index=True)
+    description = Column(String)
+    category = Column(String, index=True)
+    age_group = Column(String)
+    address = Column(String)
+    place = Column(String, nullable=True)
+    image_url = Column(String, nullable=True)  # <-- РџРѕР»Рµ РґР»СЏ РєР°СЂС‚РёРЅРєРё
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+    is_free = Column(Boolean, default=False)
+    is_first_free = Column(Boolean, default=False)
+    gender_male = Column(Boolean, default=True, nullable=True)
+    gender_female = Column(Boolean, default=True, nullable=True)
+    price = Column(String, nullable=True)
+    schedule = Column(String, nullable=True)
+    group_subtitle = Column(String, nullable=True)
+    teacher_name = Column(String, nullable=True)
+    total_spots = Column(Integer, default=20, nullable=True)
+    _spots_info = Column("spots_info", String, nullable=True)
+    duration = Column(String, nullable=True)
+    base_level_info = Column(String, nullable=True)
+    advanced_level_info = Column(String, nullable=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    owner = relationship("User", foreign_keys=[owner_id])
+    bookings = relationship("Booking", back_populates="activity", lazy="selectin")
+
+    @property
+    def accepted_bookings_count(self) -> int:
+        if self.bookings:
+            return sum(1 for b in self.bookings if b.status == "РџСЂРёРЅСЏС‚Рѕ")
+        return 0
+
+    @property
+    def spots_info(self) -> str:
+        total = self.total_spots if self.total_spots is not None else 20
+        return f"{self.accepted_bookings_count} РёР· {total}"
+
+    @spots_info.setter
+    def spots_info(self, value):
+        self._spots_info = value
+
+class Booking(Base):
+    __tablename__ = "bookings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    parent_name = Column(String)
+    child_name = Column(String)
+    child_age = Column(Integer)
+    phone = Column(String)
+    status = Column(String, default="РћР¶РёРґР°РµС‚")
+    created_at = Column(String, nullable=True)
+
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    activity_id = Column(Integer, ForeignKey("activities.id"))
+    
+    activity = relationship("Activity", back_populates="bookings")
+    user = relationship("User", foreign_keys=[user_id])
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    phone = Column(String, nullable=True, index=True)
+    role = Column(String, default="parent")  # "parent" (Р РѕРґРёС‚РµР»СЊ) РёР»Рё "leader" (Р СѓРєРѕРІРѕРґРёС‚РµР»СЊ РєСЂСѓР¶РєР°)
+    hashed_password = Column(String, nullable=False)
+    token = Column(String, nullable=True, index=True)
+
+class Review(Base):
+    __tablename__ = "reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rating = Column(Integer, nullable=False)  # РћС†РµРЅРєР° (РѕС‚ 1 РґРѕ 5)
+    text = Column(String, nullable=False)     # РўРµРєСЃС‚ РѕС‚Р·С‹РІР°
+    created_at = Column(String, nullable=True) # Р”Р°С‚Р° СЃРѕР·РґР°РЅРёСЏ
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+    activity = relationship("Activity", foreign_keys=[activity_id])
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    text = Column(String, nullable=False)        # РўРµРєСЃС‚ СѓРІРµРґРѕРјР»РµРЅРёСЏ
+    is_read = Column(Boolean, default=False)    # РџСЂРѕС‡РёС‚Р°РЅРѕ РёР»Рё РЅРµС‚
+    created_at = Column(String, nullable=True)  # Р”Р°С‚Р° РѕС‚РїСЂР°РІРєРё
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
+
+
+----- auth_utils.py -----
+import hashlib
+import secrets
+import hmac
+
+def hash_password(password: str) -> str:
+    """РҐСЌС€РёСЂРѕРІР°РЅРёРµ РїР°СЂРѕР»СЏ СЃ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёРµРј PBKDF2 HMAC SHA256 Рё СЃРѕР»СЊСЋ."""
+    salt = secrets.token_bytes(16)
+    hash_bytes = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return f"{salt.hex()}${hash_bytes.hex()}"
+
+def verify_password(plain_password: str, stored_hash: str) -> bool:
+    """РџСЂРѕРІРµСЂРєР° СЃРѕРѕС‚РІРµС‚СЃС‚РІРёСЏ РѕС‚РєСЂС‹С‚РѕРіРѕ РїР°СЂРѕР»СЏ С…СЌС€Сѓ."""
+    try:
+        salt_hex, hash_hex = stored_hash.split('$')
+        salt = bytes.fromhex(salt_hex)
+        expected_hash = bytes.fromhex(hash_hex)
+        calculated_hash = hashlib.pbkdf2_hmac('sha256', plain_password.encode('utf-8'), salt, 100000)
+        return hmac.compare_digest(calculated_hash, expected_hash)
+    except Exception:
+        return False
+
+def generate_token() -> str:
+    """Р“РµРЅРµСЂР°С†РёСЏ СЃР»СѓС‡Р°Р№РЅРѕРіРѕ РєСЂРёРїС‚РѕРіСЂР°С„РёС‡РµСЃРєРё СЃС‚РѕР№РєРѕРіРѕ С‚РѕРєРµРЅР° Р°РІС‚РѕСЂРёР·Р°С†РёРё."""
+    return secrets.token_urlsafe(32)
+
+----- main.py -----
+import sys
+import os
+
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from db import models
+from db.database import engine
+from api.routers import router
+
+from sqlalchemy import inspect, text
+
+# РџСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ СЃРѕР·РґР°РµРј РїР°РїРєСѓ РґР»СЏ РєР°СЂС‚РёРЅРѕРє РїСЂРё Р·Р°РїСѓСЃРєРµ
+os.makedirs("uploads", exist_ok=True)
+
+# РђРІС‚РѕРјР°С‚РёС‡РµСЃРєРѕРµ РґРѕР±Р°РІР»РµРЅРёРµ РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‰РёС… РєРѕР»РѕРЅРѕРє РІ SQLite
+def run_migrations():
+    with engine.connect() as conn:
+        inspector = inspect(engine)
+        if "activities" in inspector.get_table_names():
+            columns = [c["name"] for c in inspector.get_columns("activities")]
+            if "owner_id" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN owner_id INTEGER"))
+                conn.commit()
+            if "group_subtitle" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN group_subtitle TEXT"))
+                conn.commit()
+            if "teacher_name" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN teacher_name TEXT"))
+                conn.commit()
+            if "total_spots" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN total_spots INTEGER DEFAULT 20"))
+                conn.commit()
+            if "spots_info" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN spots_info TEXT"))
+                conn.commit()
+            # РћР±РЅРѕРІР»СЏРµРј total_spots РґР»СЏ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёС… Р·Р°РїРёСЃРµР№, РµСЃР»Рё РѕРЅРё NULL
+            conn.execute(text("UPDATE activities SET total_spots = 20 WHERE total_spots IS NULL"))
+            conn.commit()
+            if "duration" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN duration TEXT"))
+                conn.commit()
+            if "base_level_info" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN base_level_info TEXT"))
+                conn.commit()
+            if "advanced_level_info" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN advanced_level_info TEXT"))
+                conn.commit()
+            if "is_first_free" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN is_first_free BOOLEAN DEFAULT 0"))
+                conn.commit()
+            if "gender_male" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN gender_male BOOLEAN DEFAULT 1"))
+                conn.commit()
+            if "gender_female" not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN gender_female BOOLEAN DEFAULT 1"))
+                conn.commit()
+        if "bookings" in inspector.get_table_names():
+            columns = [c["name"] for c in inspector.get_columns("bookings")]
+            if "user_id" not in columns:
+                conn.execute(text("ALTER TABLE bookings ADD COLUMN user_id INTEGER"))
+                conn.commit()
+            if "created_at" not in columns:
+                conn.execute(text("ALTER TABLE bookings ADD COLUMN created_at TEXT"))
+                conn.commit()
+
+run_migrations()
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="KidsConnect API", description="Р‘СЌРєРµРЅРґ РґР»СЏ РїРѕРёСЃРєР° Рё Р·Р°РїРёСЃРё РІ РєСЂСѓР¶РєРё")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Р Р°Р·СЂРµС€Р°РµРј С„СЂРѕРЅС‚РµРЅРґСѓ РґРѕСЃС‚СѓРї Рє С„Р°Р№Р»Р°Рј РІРЅСѓС‚СЂРё РїР°РїРєРё uploads
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+app.include_router(router, prefix="/api")
+
+----- schemas.py -----
+from pydantic import BaseModel
+from typing import Optional
+
+class ActivityBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    age_group: Optional[str] = None
+    address: Optional[str] = None
+    place: Optional[str] = None
+    image_url: Optional[str] = None            # <-- РџРѕР»Рµ РґР»СЏ РєР°СЂС‚РёРЅРєРё
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    is_free: bool = False
+    is_first_free: bool = False
+    gender_male: Optional[bool] = True
+    gender_female: Optional[bool] = True
+    price: Optional[str] = None
+    schedule: Optional[str] = None
+    group_subtitle: Optional[str] = None
+    teacher_name: Optional[str] = None
+    total_spots: Optional[int] = 20
+    spots_info: Optional[str] = None
+    duration: Optional[str] = None
+    base_level_info: Optional[str] = None
+    advanced_level_info: Optional[str] = None
+    owner_id: Optional[int] = None
+
+class ActivityCreate(ActivityBase):
+    pass
+
+class ActivityResponse(ActivityBase):
+    id: int
+    accepted_bookings_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+class BookingCreate(BaseModel):
+    parent_name: str
+    child_name: str
+    child_age: int
+    phone: str
+    activity_id: int
+    user_id: Optional[int] = None
+
+class BookingResponse(BookingCreate):
+    id: int
+    status: str
+    created_at: Optional[str] = None
+    activity: Optional[ActivityResponse] = None
+
+    class Config:
+        from_attributes = True
+
+class BookingStatusUpdate(BaseModel):
+    status: str
+
+# --- РђР’РўРћР РР—РђР¦РРЇ Р РџРћР›Р¬Р—РћР’РђРўР•Р›Р ---
+class UserRegister(BaseModel):
+    name: str
+    email: str
+    phone: Optional[str] = None
+    role: Optional[str] = "parent"  # "parent" РёР»Рё "leader"
+    password: str
+
+class UserLogin(BaseModel):
+    login: str  # e-mail РёР»Рё С‚РµР»РµС„РѕРЅ
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    phone: Optional[str] = None
+    role: str = "parent"
+
+    class Config:
+        from_attributes = True
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+# --- РћРўР—Р«Р’Р« ---
+class ReviewCreate(BaseModel):
+    rating: int
+    text: str
+    activity_id: int
+
+class ReviewResponse(BaseModel):
+    id: int
+    rating: int
+    text: str
+    created_at: Optional[str] = None
+    user_id: int
+    activity_id: int
+    user: Optional[UserResponse] = None
+
+    class Config:
+        from_attributes = True
+
+# --- РЈР’Р•Р”РћРњР›Р•РќРРЇ ---
+class NotificationResponse(BaseModel):
+    id: int
+    text: str
+    is_read: bool
+    created_at: Optional[str] = None
+    user_id: int
+
+    class Config:
+        from_attributes = True
+
+class NotificationUpdate(BaseModel):
+    is_read: bool
+
+
+
+
+----- AppHeader.vue -----
+<template>
+  <header class="header">
+    <router-link to="/" class="logo">
+      <img :src="getImageUrl('/image/LeavesPlay1.svg')" alt="Logo" class="logo-icon" />
+      <span>KidsConnect</span>
+    </router-link>
+
+    <div v-if="authStore.isAuthenticated.value" class="user-menu">
+      <!-- РРєРѕРЅРєР° РєРѕР»РѕРєРѕР»СЊС‡РёРєР° СѓРІРµРґРѕРјР»РµРЅРёР№ -->
+      <div class="notifications-wrapper" ref="notifRef">
+        <button 
+          class="notif-btn" 
+          @click="toggleNotifDropdown" 
+          title="РЈРІРµРґРѕРјР»РµРЅРёСЏ"
+          :aria-expanded="isNotifOpen"
+        >
+          <img :src="getImageUrl('/image/РЈРІРµРґРѕРјР»РµРЅРёРµ.svg')" alt="РЈРІРµРґРѕРјР»РµРЅРёСЏ" class="notif-icon" />
+          <span v-if="unreadCount > 0" class="notif-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+        </button>
+
+        <!-- Р’С‹РїР°РґР°СЋС‰РµРµ РјРµРЅСЋ СѓРІРµРґРѕРјР»РµРЅРёР№ -->
+        <div v-if="isNotifOpen" class="notif-dropdown">
+          <div class="notif-header">
+            <span class="notif-title">РЈРІРµРґРѕРјР»РµРЅРёСЏ</span>
+            <button v-if="unreadCount > 0" class="btn-read-all" @click="markAllAsRead">РџСЂРѕС‡РёС‚Р°С‚СЊ РІСЃРµ</button>
+          </div>
+
+          <div class="notif-list">
+            <div v-if="loadingNotifs" class="notif-empty">
+              Р—Р°РіСЂСѓР·РєР°...
+            </div>
+            <div v-else-if="notifications.length === 0" class="notif-empty">
+              РЈ РІР°СЃ РїРѕРєР° РЅРµС‚ СѓРІРµРґРѕРјР»РµРЅРёР№
+            </div>
+            <div 
+              v-else 
+              v-for="notif in notifications" 
+              :key="notif.id" 
+              class="notif-item" 
+              :class="{ unread: !notif.is_read }"
+              @click="markOneAsRead(notif)"
+            >
+              <div class="notif-text">{{ notif.text }}</div>
+              <div class="notif-time">{{ notif.created_at || '' }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <router-link to="/profile" class="user-info" title="РџРµСЂРµР№С‚Рё РІ Р»РёС‡РЅС‹Р№ РєР°Р±РёРЅРµС‚">
+        <img :src="getImageUrl('/image/Р›РѕРіРёРЅ1.svg')" alt="icon" class="icon" />
+        <span class="user-name">{{ authStore.user.value?.name }}</span>
+        <span class="role-badge" :class="authStore.user.value?.role">
+          {{ authStore.isLeader.value ? 'Р СѓРєРѕРІРѕРґРёС‚РµР»СЊ' : 'Р РѕРґРёС‚РµР»СЊ' }}
+        </span>
+      </router-link>
+      
+      <router-link to="/profile" class="btn-profile">РџСЂРѕС„РёР»СЊ</router-link>
+      <button class="btn-logout" @click="handleLogout">Р’С‹Р№С‚Рё</button>
+    </div>
+      
+    <router-link v-else to="/auth" class="auth-btn">
+      <img :src="getImageUrl('/image/Р›РѕРіРёРЅ.svg')" alt="icon" class="icon" />
+      <span>Р’РѕР№С‚Рё / Р РµРіРёСЃС‚СЂР°С†РёСЏ</span>
+    </router-link>
+  </header>
+</template>
+
+<script setup>
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { authStore } from '../authStore'
+import api from '../api'
+import { getImageUrl } from '../utils'
+
+const notifRef = ref(null)
+const isNotifOpen = ref(false)
+const notifications = ref([])
+const loadingNotifs = ref(false)
+
+const unreadCount = computed(() => {
+  return notifications.value.filter(n => !n.is_read).length
+})
+
+// Р—Р°РіСЂСѓР·РєР° СЃРїРёСЃРєР° СѓРІРµРґРѕРјР»РµРЅРёР№
+async function fetchNotifications() {
+  if (!authStore.isAuthenticated.value) return
+  loadingNotifs.value = true
+  try {
+    const list = await api.getNotifications()
+    notifications.value = list || []
+  } catch (err) {
+    console.warn('РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ СѓРІРµРґРѕРјР»РµРЅРёСЏ:', err)
+  } finally {
+    loadingNotifs.value = false
+  }
+}
+
+function toggleNotifDropdown() {
+  isNotifOpen.value = !isNotifOpen.value
+  if (isNotifOpen.value) {
+    fetchNotifications()
+  }
+}
+
+// РћС‚РјРµС‚РєР° РѕРґРЅРѕРіРѕ СѓРІРµРґРѕРјР»РµРЅРёСЏ РєР°Рє РїСЂРѕС‡РёС‚Р°РЅРЅРѕРіРѕ
+async function markOneAsRead(notif) {
+  if (notif.is_read) return
+  try {
+    await api.markNotificationRead(notif.id)
+    notif.is_read = true
+  } catch (err) {
+    console.warn('РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ СЃС‚Р°С‚СѓСЃ СѓРІРµРґРѕРјР»РµРЅРёСЏ:', err)
+  }
+}
+
+// РћС‚РјРµС‚РєР° РІСЃРµС… СѓРІРµРґРѕРјР»РµРЅРёР№ РїСЂРѕС‡РёС‚Р°РЅРЅС‹РјРё
+async function markAllAsRead() {
+  const unreadItems = notifications.value.filter(n => !n.is_read)
+  for (const item of unreadItems) {
+    await markOneAsRead(item)
+  }
+}
+
+// Р—Р°РєСЂС‹С‚РёРµ РїСЂРё РєР»РёРєРµ СЃРЅР°СЂСѓР¶Рё
+function handleClickOutside(event) {
+  if (notifRef.value && !notifRef.value.contains(event.target)) {
+    isNotifOpen.value = false
+  }
+}
+
+watch(() => authStore.isAuthenticated.value, (isAuth) => {
+  if (isAuth) {
+    fetchNotifications()
+  } else {
+    notifications.value = []
+  }
+}, { immediate: true })
+
+onMounted(() => {
+  authStore.checkAuth()
+  window.addEventListener('click', handleClickOutside)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', handleClickOutside)
+})
+
+function handleLogout() {
+  authStore.logout()
+}
+</script>
+
+
+<style scoped>
+.logo {
+  text-decoration: none;
+  color: #ffffff !important;
+}
+
+.logo span {
+  color: #ffffff !important;
+}
+
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+}
+
+.user-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background-color: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 0.2s ease;
+}
+
+.user-info:hover {
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+.user-name {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.role-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  margin-left: 4px;
+}
+
+.role-badge.leader {
+  background-color: #ffd54f;
+  color: #3e2723;
+}
+
+.btn-profile {
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: #ffffff;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.btn-profile:hover {
+  background: rgba(255, 255, 255, 0.35);
+  border-color: #ffffff;
+}
+
+.btn-logout {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: #ffffff;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-logout:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: #ffffff;
+}
+
+.auth-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--bg-color, #ffffff);
+  color: var(--primary-dark, #70232f);
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  margin-left: auto;
+}
+
+.auth-btn:hover {
+  background-color: #f8f8f8;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.auth-icon {
+  flex-shrink: 0;
+}
+
+/* РЎС‚РёР»Рё РєРѕРјРїРѕРЅРµРЅС‚Р° СѓРІРµРґРѕРјР»РµРЅРёР№ */
+.notifications-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.notif-btn {
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.2s ease;
+}
+
+.notif-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.notif-icon {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+.notif-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background-color: #ef4444;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 2px solid var(--primary-dark, #70232f);
+}
+
+.notif-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 320px;
+  max-height: 400px;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  border: 1px solid #e5e7eb;
+  z-index: 1000;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.notif-header {
+  padding: 14px 16px;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.notif-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-main, #333333);
+}
+
+.btn-read-all {
+  background: none;
+  border: none;
+  color: var(--primary-dark, #70232f);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.btn-read-all:hover {
+  text-decoration: underline;
+}
+
+.notif-list {
+  overflow-y: auto;
+  max-height: 330px;
+}
+
+.notif-item {
+  padding: 12px 16px;
+  border-bottom: 1px solid #f3f4f6;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+  text-align: left;
+}
+
+.notif-item:hover {
+  background-color: #f9fafb;
+}
+
+.notif-item.unread {
+  background-color: #fff8f8;
+  border-left: 3px solid var(--primary-dark, #70232f);
+}
+
+.notif-text {
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.notif-time {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 4px;
+}
+
+.notif-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 13px;
+}
+</style>
+
+
+
+----- CardItem.vue -----
+<template>
+  <article class="card">
+    <div class="card-image">
+      <img 
+        :src="getImageUrl(item.image || '/image/Group330.svg')" 
+        @error="$event.target.src = getImageUrl('/image/Group330.svg')" 
+        alt="Preview" 
+      />
+    </div>
+    <div class="card-content">
+      <div class="card-header">
+        <h3>
+          {{ item.title }}
+          <span v-if="item.locationText" class="location-text">{{ item.locationText }}</span>
+        </h3>
+        
+        <!-- Р‘РµР№РґР¶Рё СЃС‚РѕРёРјРѕСЃС‚Рё Рё РѕСЃРѕР±РµРЅРЅРѕСЃС‚РµР№ -->
+        <div v-if="item.priceGroup" class="price-group">
+          <span v-if="item.priceGroup.outlineBadge" class="badge badge-outline">
+            {{ item.priceGroup.outlineBadge }}
+          </span>
+          <span 
+            class="badge badge-free" 
+            :class="{ 'price-badge': item.priceGroup.subText }"
+          >
+            <span>{{ item.priceGroup.mainText }}</span>
+            <span v-if="item.priceGroup.subText">{{ item.priceGroup.subText }}</span>
+          </span>
+        </div>
+        <span v-else-if="item.isFree" class="badge badge-free">Р‘РµСЃРїР»Р°С‚РЅРѕ</span>
+        <span v-else class="badge badge-free">{{ item.price }}</span>
+      </div>
+
+      <div class="card-details">
+        <p v-if="item.hashtag" class="hashtag">{{ item.hashtag }}</p>
+
+        <p v-if="item.age" class="info-row">
+          <img :src="getImageUrl('/image/Frame397.svg')" class="icon" alt="age" /> {{ item.age }}
+        </p>
+
+        <p v-if="item.address" class="info-row">
+          <img :src="getImageUrl('/image/layer1.svg')" class="icon" alt="address" /> {{ item.address }}
+        </p>
+
+        <p v-if="item.place" class="info-row">
+          <img :src="getImageUrl('/image/Group.svg')" class="icon" alt="place" /> {{ item.place }}
+        </p>
+
+        <div v-if="item.schedule" class="schedule-row">
+          <div class="schedule-days">
+            <img :src="getImageUrl('/image/clock_time_icon_1429031.svg')" class="icon" alt="clock" />
+            <span>{{ item.schedule.days }}</span>
+          </div>
+          <span 
+            v-for="(slot, idx) in item.schedule.slots" 
+            :key="idx" 
+            class="time-slot"
+          >
+            {{ slot }}
+          </span>
+        </div>
+      </div>
+
+      <router-link :to="item.detailUrl || (item.id ? `/detail?id=${item.id}` : '/detail')" class="btn-more">
+        РџРѕРґСЂРѕР±РЅРµРµ
+      </router-link>
+    </div>
+  </article>
+</template>
+
+<script setup>
+import { getImageUrl } from '../utils'
+
+defineProps({
+  item: {
+    type: Object,
+    required: true
+  }
+})
+</script>
+
+----- SidebarFilters.vue -----
+<template>
+  <aside class="sidebar">
+    <h2 class="sidebar-title">Р¤РёР»СЊС‚СЂС‹</h2>
+    <div class="filter-box">
+      <!-- Р’РѕР·СЂР°СЃС‚ -->
+      <div class="filter-group age-filter-group">
+        <label>Р’РѕР·СЂР°СЃС‚</label>
+        
+        <div class="custom-dropdown" ref="dropdownRef">
+          <div class="select-wrapper" @click="toggleDropdown">
+            <span class="select-value">{{ selectedAge }}</span>
+            <img :src="getImageUrl('/image/chevrondown1.svg')" class="select-icon" alt="arrow" />
+          </div>
+          
+          <div class="dropdown-list" :class="{ show: isDropdownOpen }">
+            <div 
+              v-for="age in ageOptions" 
+              :key="age" 
+              class="dropdown-item" 
+              :class="{ active: selectedAge === age }"
+              @click="selectAge(age)"
+            >
+              {{ age }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- РџРѕР» -->
+      <div class="filter-group">
+        <label>РџРѕР»</label>
+        <div class="checkbox-group">
+          <label class="custom-checkbox">
+            <input 
+              type="checkbox" 
+              class="hidden-cb" 
+              v-model="genderMale"
+              @change="emitGenderChange"
+            />
+            <span class="check-box">
+              <img v-if="genderMale" :src="getImageUrl('/image/check.svg')" alt="check" />
+            </span>
+            РњСѓР¶СЃРєРѕР№
+          </label>
+          
+          <label class="custom-checkbox">
+            <input 
+              type="checkbox" 
+              class="hidden-cb" 
+              v-model="genderFemale"
+              @change="emitGenderChange"
+            />
+            <span class="check-box">
+              <img v-if="genderFemale" :src="getImageUrl('/image/check.svg')" alt="check" />
+            </span>
+            Р–РµРЅСЃРєРёР№
+          </label>
+        </div>
+      </div>
+
+      <!-- РљР°С‚Р°Р»РѕРі -->
+      <div class="filter-group menu-list">
+        <label>РљР°С‚Р°Р»РѕРі</label>
+        <ul>
+          <li 
+            v-for="cat in displayCategories" 
+            :key="cat.name"
+            :class="{ 'active-category': cat.expanded }"
+          >
+            <div class="menu-item" @click="toggleCategory(cat)">
+              <span class="menu-text">{{ cat.name }}</span>
+              <span v-if="cat.count > 0" class="menu-count">{{ cat.count }}</span>
+              <img :src="getImageUrl('/image/chevrondown1.svg')" class="chevron" alt="chevron" />
+            </div>
+            
+            <ul v-if="cat.subItems && cat.subItems.length" class="sub-menu">
+              <li 
+                v-for="sub in cat.subItems" 
+                :key="sub.name"
+                @click.stop="selectSubCategory(cat, sub)"
+              >
+                <span class="menu-text">вЂў {{ sub.name }}</span>
+                <span v-if="sub.count > 0" class="menu-count">{{ sub.count }}</span>
+              </li>
+            </ul>
+          </li>
+        </ul>
+      </div>
+
+    </div>
+  </aside>
+</template>
+
+<script setup>
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { getImageUrl } from '../utils'
+
+const props = defineProps({
+  selectedAge: {
+    type: String,
+    default: 'Р›СЋР±РѕР№'
+  },
+  selectedCategory: {
+    type: String,
+    default: null
+  },
+  selectedSubCategory: {
+    type: String,
+    default: null
+  },
+  activities: {
+    type: Array,
+    default: () => []
+  }
+})
+
+const emit = defineEmits(['update:selectedAge', 'update:gender', 'selectCategory'])
+
+const dropdownRef = ref(null)
+const isDropdownOpen = ref(false)
+
+const genderMale = ref(true)
+const genderFemale = ref(true)
+
+const ageOptions = [
+  'Р›СЋР±РѕР№',
+  '1 РіРѕРґ', '2 РіРѕРґР°', '3 РіРѕРґР°', '4 РіРѕРґР°', '5 Р»РµС‚',
+  '6 Р»РµС‚', '7 Р»РµС‚', '8 Р»РµС‚', '9 Р»РµС‚', '10 Р»РµС‚',
+  '11 Р»РµС‚', '12 Р»РµС‚', '13 Р»РµС‚', '14 Р»РµС‚', '15 Р»РµС‚',
+  '16 Р»РµС‚', '17 Р»РµС‚', '18 Р»РµС‚'
+]
+
+const categories = ref([
+  { name: 'РЎРёР»РѕРІРѕР№ СЃРїРѕСЂС‚', expanded: false },
+  { name: 'Р•РґРёРЅРѕР±РѕСЂСЃС‚РІР°', expanded: false },
+  { name: 'Р”РџР Рё СЂРµРјРµСЃР»Р°', expanded: false },
+  { name: 'РўРµС…РЅРёС‡РµСЃРєРѕРµ РєРѕРЅСЃС‚СЂСѓРёСЂРѕРІР°РЅРёРµ', expanded: false },
+  { name: 'РЎР»РѕРІРµСЃРЅРѕСЃС‚СЊ', expanded: false },
+  { name: 'РРЅРѕСЃС‚СЂР°РЅРЅС‹Рµ СЏР·С‹РєРё', expanded: false },
+  { name: 'Р Р°Р·РІРёС‚РёРµ РёРЅС‚РµР»Р»РµРєС‚Р°', expanded: false },
+  { name: 'РРЅС„РѕСЂРјР°С†РёРѕРЅРЅС‹Рµ С‚РµС…РЅРѕР»РѕРіРёРё', expanded: false },
+  { name: 'РСЃС‚РѕСЂРёСЏ Рё РўСЂР°РґРёС†РёРё', expanded: false },
+  { name: 'РџРµРґР°РіРѕРіРёРєР°', expanded: false },
+  { name: 'РњСѓР·С‹РєР° Рё Р·РІСѓРє', expanded: false },
+  { name: 'РџРµРЅРёРµ', expanded: false },
+  { name: 'РҐРѕСЂРµРѕРіСЂР°С„РёСЏ(С‚Р°РЅС†С‹)', expanded: false },
+  { name: 'Р—СЂРµР»РёС‰РЅС‹Рµ РёСЃРєСѓСЃСЃС‚РІР°', expanded: false },
+  { name: 'РњРѕРґР° Рё СЃС‚РёР»СЊ', expanded: false },
+  { name: 'РџРѕР·РЅР°РІР°С‚РµР»СЊРЅС‹Рµ СЂР°Р·РІР»РµС‡РµРЅРёСЏ', expanded: false },
+  { name: 'РўСѓСЂРёР·Рј', expanded: false },
+  { name: 'Р•СЃС‚РµСЃС‚РІРµРЅРЅС‹Рµ РЅР°СѓРєРё', expanded: false },
+  { name: 'Р›СЋРґРё Рё Р¶РёРІРѕС‚РЅС‹Рµ', expanded: false },
+  { name: 'Р­СЃС‚РµС‚РёС‡РµСЃРєРёРµ РІРёРґС‹ СЃРїРѕСЂС‚Р°', expanded: false },
+  { name: 'РўРµС…РЅРёС‡РµСЃРєРёРµ РІРёРґС‹ СЃРїРѕСЂС‚Р°', expanded: false },
+  { name: 'РљРѕРјР°РЅРґРЅРѕ-РёРіСЂРѕРІРѕР№ СЃРїРѕСЂС‚', expanded: false },
+  { name: 'РРЅРґРёРІРёРґСѓР°Р»СЊРЅРѕ РёРіСЂРѕРІРѕР№ СЃРїРѕСЂС‚', expanded: false },
+  { name: 'Р’РѕРґРЅС‹Рµ РІРёРґС‹ СЃРїРѕСЂС‚Р°', expanded: false },
+  { name: 'Р›С‘РіРєР°СЏ Р°С‚Р»РµС‚РёРєР° Рё РіРёРјРЅР°СЃС‚РёРєР°', expanded: false },
+  { name: 'Р¤РёР·РєСѓР»СЊС‚СѓСЂР°', expanded: false }
+])
+
+function normalizeKey(str) {
+  if (!str) return ''
+  return str.toLowerCase()
+            .replace(/^#/, '')
+            .replace(/[-вЂ“вЂ”\s]+/g, '')
+            .trim()
+}
+
+function getClubName(item) {
+  if (!item) return ''
+  let title = (item.title || '').trim()
+  title = title.replace(/\s*\([^)]*\)/g, '').trim()
+  return title || item.title
+}
+
+const expandedCategories = ref({})
+
+watch(() => props.selectedCategory, (newCat) => {
+  if (newCat) {
+    expandedCategories.value[normalizeKey(newCat)] = true
+  }
+}, { immediate: true })
+
+const displayCategories = computed(() => {
+  const allActivities = props.activities || []
+
+  // Р“СЂСѓРїРїРёСЂСѓРµРј РІСЃРµ РєСЂСѓР¶РєРё РїРѕ РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅС‹Рј РєР»СЋС‡Р°Рј РєР°С‚РµРіРѕСЂРёР№
+  const activitiesByCatKey = {}
+
+  allActivities.forEach(item => {
+    const rawCat = (item.category || '').trim()
+    if (!rawCat) return
+
+    const normKey = normalizeKey(rawCat)
+    if (!activitiesByCatKey[normKey]) {
+      activitiesByCatKey[normKey] = {
+        catName: rawCat.replace(/^#/, '').trim(),
+        clubs: {},
+        totalCount: 0
+      }
+    }
+
+    const clubName = getClubName(item) || item.title || 'РљСЂСѓР¶РѕРє'
+    activitiesByCatKey[normKey].totalCount += 1
+    activitiesByCatKey[normKey].clubs[clubName] = (activitiesByCatKey[normKey].clubs[clubName] || 0) + 1
+  })
+
+  const knownNormKeys = new Set()
+
+  const list = categories.value.map(cat => {
+    const normKey = normalizeKey(cat.name)
+    knownNormKeys.add(normKey)
+
+    const catData = activitiesByCatKey[normKey]
+    
+    let subItems = []
+    let totalCount = 0
+
+    if (catData) {
+      totalCount = catData.totalCount
+      subItems = Object.keys(catData.clubs).map(clubName => ({
+        name: clubName,
+        count: catData.clubs[clubName]
+      }))
+    }
+
+    return {
+      ...cat,
+      expanded: !!expandedCategories.value[normKey],
+      count: totalCount,
+      subItems: subItems
+    }
+  })
+
+  // Р”РѕР±Р°РІР»СЏРµРј РєР°С‚РµРіРѕСЂРёРё РёР· Р±Р°Р·С‹ РґР°РЅРЅС‹С…, РєРѕС‚РѕСЂС‹С… РЅРµС‚ РІ РїСЂРµРґСѓСЃС‚Р°РЅРѕРІР»РµРЅРЅРѕРј СЃРїРёСЃРєРµ
+  Object.keys(activitiesByCatKey).forEach(normKey => {
+    if (!knownNormKeys.has(normKey)) {
+      const catData = activitiesByCatKey[normKey]
+      const subItems = Object.keys(catData.clubs).map(clubName => ({
+        name: clubName,
+        count: catData.clubs[clubName]
+      }))
+
+      list.push({
+        name: catData.catName,
+        expanded: !!expandedCategories.value[normKey],
+        count: catData.totalCount,
+        subItems: subItems
+      })
+    }
+  })
+
+  return list
+})
+
+
+
+function toggleDropdown() {
+  isDropdownOpen.value = !isDropdownOpen.value
+}
+
+function selectAge(age) {
+  emit('update:selectedAge', age)
+  isDropdownOpen.value = false
+}
+
+function emitGenderChange() {
+  emit('update:gender', { male: genderMale.value, female: genderFemale.value })
+}
+
+function toggleCategory(cat) {
+  const normKey = normalizeKey(cat.name)
+  const isCurrentlyExpanded = !!expandedCategories.value[normKey]
+  expandedCategories.value[normKey] = !isCurrentlyExpanded
+
+  if (!isCurrentlyExpanded) {
+    emit('selectCategory', { category: cat.name, subCategory: null })
+  } else {
+    if (props.selectedCategory === cat.name) {
+      emit('selectCategory', { category: null, subCategory: null })
+    }
+  }
+}
+
+function selectSubCategory(category, subCategory) {
+  if (props.selectedSubCategory === subCategory.name) {
+    emit('selectCategory', { category: category.name, subCategory: null })
+  } else {
+    emit('selectCategory', { category: category.name, subCategory: subCategory.name })
+  }
+}
+
+function handleClickOutside(event) {
+  if (dropdownRef.value && !dropdownRef.value.contains(event.target)) {
+    isDropdownOpen.value = false
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('click', handleClickOutside)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', handleClickOutside)
+})
+</script>
+
+----- TopBar.vue -----
+<template>
+  <div class="top-bar">
+    <div class="search-box">
+      <img :src="getImageUrl('/image/search1.svg')" alt="Search" class="icon-sm" />
+      <input 
+        type="text" 
+        placeholder="РџРѕРёСЃРє" 
+        :value="searchQuery" 
+        @input="$emit('update:searchQuery', $event.target.value)"
+      />
+    </div>
+
+    <div class="tabs">
+      <button 
+        class="tab" 
+        :class="{ active: activeTab === 'all' }" 
+        @click="$emit('update:activeTab', 'all')"
+      >
+        Р’СЃРµ
+      </button>
+      <button 
+        class="tab" 
+        :class="{ active: activeTab === 'paid' }" 
+        @click="$emit('update:activeTab', 'paid')"
+      >
+        РџР»Р°С‚РЅС‹Рµ
+      </button>
+      <button 
+        class="tab" 
+        :class="{ active: activeTab === 'free' }" 
+        @click="$emit('update:activeTab', 'free')"
+      >
+        Р‘РµСЃРїР»Р°С‚РЅС‹Рµ
+      </button>
+    </div>
+
+    <button class="map-btn" @click="$emit('toggleMap')">
+      РќР° РєР°СЂС‚Рµ
+      <img :src="getImageUrl('/image/Group.svg')" alt="Map" class="icon-sm" />
+    </button>
+  </div>
+</template>
+
+<script setup>
+import { getImageUrl } from '../utils'
+
+defineProps({
+  searchQuery: {
+    type: String,
+    default: ''
+  },
+  activeTab: {
+    type: String,
+    default: 'all'
+  }
+})
+
+defineEmits(['update:searchQuery', 'update:activeTab', 'toggleMap'])
+</script>
+
+----- AuthView.vue -----
+<template>
+  <div class="content-wrapper">
+    <!-- РќР°РІРёРіР°С†РёСЏ РЅР°Р·Р°Рґ -->
+    <div class="top-nav">
+      <router-link to="/" class="nav-btn">
+        <img src="/image/Group3302.svg" alt="Back" class="icon-sm" /> РќР° РіР»Р°РІРЅСѓСЋ
+      </router-link>
+    </div>
+
+    <div class="auth-container">
+      <div class="auth-card">
+        <!-- РЁР°РїРєР° С„РѕСЂРјС‹ / РўР°Р±С‹ -->
+        <div class="auth-header">
+          <h1 class="auth-title">{{ activeTab === 'login' ? 'Р’С…РѕРґ РІ Р°РєРєР°СѓРЅС‚' : 'Р РµРіРёСЃС‚СЂР°С†РёСЏ' }}</h1>
+          <p class="auth-subtitle">
+            {{ activeTab === 'login' ? 'Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РІ KidsConnect! Р’РѕР№РґРёС‚Рµ РґР»СЏ РґРѕСЃС‚СѓРїР° Рє Р·Р°РїРёСЃРё' : 'РЎРѕР·РґР°Р№С‚Рµ Р°РєРєР°СѓРЅС‚, С‡С‚РѕР±С‹ Р»РµРіРєРѕ Р·Р°РїРёСЃС‹РІР°С‚СЊ РґРµС‚РµР№ РІ РєСЂСѓР¶РєРё' }}
+          </p>
+          
+          <div class="auth-tabs">
+            <button 
+              class="auth-tab" 
+              :class="{ active: activeTab === 'login' }"
+              @click="activeTab = 'login'"
+            >
+              РђРІС‚РѕСЂРёР·Р°С†РёСЏ
+            </button>
+            <button 
+              class="auth-tab" 
+              :class="{ active: activeTab === 'register' }"
+              @click="activeTab = 'register'"
+            >
+              Р РµРіРёСЃС‚СЂР°С†РёСЏ
+            </button>
+          </div>
+        </div>
+
+        <!-- РЈРІРµРґРѕРјР»РµРЅРёРµ РѕР± РѕС€РёР±РєРµ -->
+        <div v-if="errorMessage" class="alert-error">
+          <span>{{ errorMessage }}</span>
+        </div>
+
+        <!-- РЈРІРµРґРѕРјР»РµРЅРёРµ РѕР± СѓСЃРїРµС€РЅРѕР№ С„РѕСЂРјРµ -->
+        <div v-if="successMessage" class="alert-success">
+          <span>{{ successMessage }}</span>
+        </div>
+
+        <!-- Р¤РћР РњРђ Р’РҐРћР”Рђ (LOGIN) -->
+        <form v-if="activeTab === 'login'" @submit.prevent="handleLogin" class="auth-form">
+          <div class="form-group">
+            <label for="login-email">Email РёР»Рё РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°</label>
+            <div class="input-wrapper">
+              <input 
+                id="login-email"
+                v-model="loginForm.login" 
+                type="text" 
+                placeholder="name@example.com РёР»Рё +7 (900) 000-00-00" 
+                required 
+              />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div class="label-row">
+              <label for="login-password">РџР°СЂРѕР»СЊ</label>
+              <a href="#" @click.prevent="handleForgotPassword" class="forgot-link">Р—Р°Р±С‹Р»Рё РїР°СЂРѕР»СЊ?</a>
+            </div>
+            <div class="input-wrapper">
+              <input 
+                id="login-password"
+                v-model="loginForm.password" 
+                :type="showPassword ? 'text' : 'password'" 
+                placeholder="Р’РІРµРґРёС‚Рµ РІР°С€ РїР°СЂРѕР»СЊ" 
+                required 
+              />
+              <button type="button" class="eye-btn" @click="showPassword = !showPassword">
+                {{ showPassword ? 'РЎРєСЂС‹С‚СЊ' : 'РџРѕРєР°Р·Р°С‚СЊ' }}
+              </button>
+            </div>
+          </div>
+
+          <div class="form-options">
+            <label class="checkbox-label">
+              <input type="checkbox" v-model="loginForm.rememberMe" />
+              <span>Р—Р°РїРѕРјРЅРёС‚СЊ РјРµРЅСЏ</span>
+            </label>
+          </div>
+
+          <button type="submit" class="btn-submit" :disabled="isSubmitting">
+            {{ isSubmitting ? 'Р’С…РѕРґ...' : 'Р’РѕР№С‚Рё' }}
+          </button>
+        </form>
+
+        <!-- Р¤РћР РњРђ Р Р•Р“РРЎРўР РђР¦РР (REGISTER) -->
+        <form v-else @submit.prevent="handleRegister" class="auth-form">
+          <div class="form-group">
+            <label for="reg-name">Р’Р°С€Рµ РёРјСЏ</label>
+            <div class="input-wrapper">
+              <input 
+                id="reg-name"
+                v-model="registerForm.name" 
+                type="text" 
+                placeholder="РРІР°РЅ РРІР°РЅРѕРІ" 
+                required 
+              />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-role">Р РѕР»СЊ РІ СЃРёСЃС‚РµРјРµ</label>
+            <div class="input-wrapper">
+              <select id="reg-role" v-model="registerForm.role" class="select-role" required>
+                <option value="parent">Р РѕРґРёС‚РµР»СЊ</option>
+                <option value="leader">Р СѓРєРѕРІРѕРґРёС‚РµР»СЊ РєСЂСѓР¶РєР°</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-email">Р­Р»РµРєС‚СЂРѕРЅРЅР°СЏ РїРѕС‡С‚Р°</label>
+            <div class="input-wrapper">
+              <input 
+                id="reg-email"
+                v-model="registerForm.email" 
+                type="email" 
+                placeholder="name@example.com" 
+                required 
+              />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-phone">РќРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°</label>
+            <div class="input-wrapper">
+              <input 
+                id="reg-phone"
+                v-model="registerForm.phone" 
+                type="tel" 
+                placeholder="+7 (964) 460 67-67" 
+                required 
+                maxlength="18"
+                @input="handlePhoneInput"
+              />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-password">РџР°СЂРѕР»СЊ</label>
+            <div class="input-wrapper">
+              <input 
+                id="reg-password"
+                v-model="registerForm.password" 
+                :type="showRegPassword ? 'text' : 'password'" 
+                placeholder="РќРµ РјРµРЅРµРµ 6 СЃРёРјРІРѕР»РѕРІ" 
+                required 
+                minlength="6"
+              />
+              <button type="button" class="eye-btn" @click="showRegPassword = !showRegPassword">
+                {{ showRegPassword ? 'РЎРєСЂС‹С‚СЊ' : 'РџРѕРєР°Р·Р°С‚СЊ' }}
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-confirm">РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РїР°СЂРѕР»СЏ</label>
+            <div class="input-wrapper">
+              <input 
+                id="reg-confirm"
+                v-model="registerForm.confirmPassword" 
+                :type="showRegPassword ? 'text' : 'password'" 
+                placeholder="РџРѕРІС‚РѕСЂРёС‚Рµ РїР°СЂРѕР»СЊ" 
+                required 
+              />
+            </div>
+          </div>
+
+          <div class="form-options">
+            <label class="checkbox-label">
+              <input type="checkbox" v-model="registerForm.agree" required />
+              <span>РЇ СЃРѕРіР»Р°СЃРµРЅ СЃ <a href="#" class="terms-link">СѓСЃР»РѕРІРёСЏРјРё РѕР±СЂР°Р±РѕС‚РєРё РїРµСЂСЃРѕРЅР°Р»СЊРЅС‹С… РґР°РЅРЅС‹С…</a></span>
+            </label>
+          </div>
+
+          <button type="submit" class="btn-submit" :disabled="isSubmitting">
+            {{ isSubmitting ? 'Р РµРіРёСЃС‚СЂР°С†РёСЏ...' : 'Р—Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°С‚СЊСЃСЏ' }}
+          </button>
+        </form>
+
+        <div class="auth-footer">
+          <p v-if="activeTab === 'login'">
+            Р•С‰С‘ РЅРµС‚ Р°РєРєР°СѓРЅС‚Р°? 
+            <button class="switch-link" @click="activeTab = 'register'">Р—Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°С‚СЊСЃСЏ</button>
+          </p>
+          <p v-else>
+            РЈР¶Рµ РµСЃС‚СЊ Р°РєРєР°СѓРЅС‚? 
+            <button class="switch-link" @click="activeTab = 'login'">Р’РѕР№С‚Рё</button>
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { authStore } from '../authStore'
+
+const router = useRouter()
+const activeTab = ref('login')
+
+const showPassword = ref(false)
+const showRegPassword = ref(false)
+const isSubmitting = ref(false)
+const successMessage = ref('')
+const errorMessage = ref('')
+
+const loginForm = ref({
+  login: '',
+  password: '',
+  rememberMe: false
+})
+
+const registerForm = ref({
+  name: '',
+  email: '',
+  phone: '',
+  role: 'parent',
+  password: '',
+  confirmPassword: '',
+  agree: false
+})
+
+let lastPhoneDigits = ''
+
+function handlePhoneInput(e) {
+  let rawValue = e.target.value
+  let digits = rawValue.replace(/\D/g, '')
+
+  if (digits.length === 1 && (digits === '7' || digits === '8')) {
+    digits = ''
+  } else if (digits.startsWith('7') || digits.startsWith('8')) {
+    digits = digits.slice(1)
+  }
+  digits = digits.slice(0, 10)
+
+  if (e.inputType === 'deleteContentBackward' && digits === lastPhoneDigits && digits.length > 0) {
+    digits = digits.slice(0, -1)
+  }
+
+  lastPhoneDigits = digits
+
+  let formatted = ''
+  if (rawValue.length > 0) {
+    if (digits.length === 0 && (rawValue.includes('7') || rawValue.includes('8'))) {
+      formatted = '+7 ('
+    } else if (digits.length > 0) {
+      formatted = '+7 (' + digits.slice(0, 3)
+      if (digits.length >= 3) {
+        formatted += ') ' + digits.slice(3, 6)
+      }
+      if (digits.length >= 6) {
+        formatted += ' ' + digits.slice(6, 8)
+      }
+      if (digits.length >= 8) {
+        formatted += '-' + digits.slice(8, 10)
+      }
+    }
+  }
+
+  registerForm.value.phone = formatted
+  e.target.value = formatted
+}
+
+watch(activeTab, () => {
+  errorMessage.value = ''
+  successMessage.value = ''
+})
+
+async function handleLogin() {
+  errorMessage.value = ''
+  successMessage.value = ''
+  isSubmitting.value = true
+  try {
+    await authStore.login({
+      login: loginForm.value.login,
+      password: loginForm.value.password
+    })
+    successMessage.value = 'Р’С‹ СѓСЃРїРµС€РЅРѕ РІРѕС€Р»Рё РІ Р°РєРєР°СѓРЅС‚!'
+    setTimeout(() => {
+      router.push('/')
+    }, 1000)
+  } catch (err) {
+    errorMessage.value = err.message || 'РћС€РёР±РєР° Р°РІС‚РѕСЂРёР·Р°С†РёРё'
+  } finally {
+    isSubmitting.value = false
+  }
+}
+
+async function handleRegister() {
+  errorMessage.value = ''
+  successMessage.value = ''
+
+  if (registerForm.value.password !== registerForm.value.confirmPassword) {
+    errorMessage.value = 'РџР°СЂРѕР»Рё РЅРµ СЃРѕРІРїР°РґР°СЋС‚!'
+    return
+  }
+
+  isSubmitting.value = true
+  try {
+    await authStore.register({
+      name: registerForm.value.name,
+      email: registerForm.value.email,
+      phone: registerForm.value.phone,
+      role: registerForm.value.role,
+      password: registerForm.value.password
+    })
+    successMessage.value = 'Р РµРіРёСЃС‚СЂР°С†РёСЏ РїСЂРѕС€Р»Р° СѓСЃРїРµС€РЅРѕ! Р’С‹РїРѕР»РЅСЏРµС‚СЃСЏ РІС…РѕРґ...'
+    setTimeout(() => {
+      router.push('/')
+    }, 1000)
+  } catch (err) {
+    errorMessage.value = err.message || 'РћС€РёР±РєР° СЂРµРіРёСЃС‚СЂР°С†РёРё'
+  } finally {
+    isSubmitting.value = false
+  }
+}
+
+function handleForgotPassword() {
+  alert('РЎСЃС‹Р»РєР° РґР»СЏ РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёСЏ РїР°СЂРѕР»СЏ РѕС‚РїСЂР°РІР»РµРЅР° РЅР° РІР°С€ e-mail.')
+}
+</script>
+
+<style scoped>
+.top-nav {
+  display: flex;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-color, #ffffff);
+  padding: 10px 20px;
+  border-radius: 5px;
+  color: var(--text-main, #333333);
+  font-size: 16px;
+  font-weight: 500;
+  border: none;
+  text-decoration: none;
+  transition: background 0.2s ease;
+}
+
+.nav-btn:hover {
+  background: #e0e0e0;
+}
+
+.icon-sm {
+  width: 16px;
+  height: 16px;
+}
+
+.auth-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px 0;
+}
+
+.auth-card {
+  background: var(--bg-color, #ffffff);
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  padding: 30px;
+  width: 100%;
+  max-width: 440px;
+  box-shadow: none;
+}
+
+.auth-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.auth-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  margin-bottom: 8px;
+}
+
+.auth-subtitle {
+  font-size: 14px;
+  color: var(--text-light, #666666);
+  line-height: 1.4;
+  margin-bottom: 20px;
+}
+
+/* РўР°Р±С‹ Р°РІС‚РѕСЂРёР·Р°С†РёРё/СЂРµРіРёСЃС‚СЂР°С†РёРё */
+.auth-tabs {
+  display: flex;
+  background: var(--bg-wrapper, #efefef);
+  border-radius: 5px;
+  padding: 4px;
+  gap: 4px;
+}
+
+.auth-tab {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 8px 14px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.auth-tab.active {
+  background: var(--bg-color, #ffffff);
+  color: var(--primary-dark, #70232f);
+  box-shadow: none;
+}
+
+.alert-success {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #e8f5e9;
+  color: #2e7d32;
+  border-radius: 5px;
+  padding: 12px 16px;
+  font-size: 14px;
+  margin-bottom: 20px;
+  border: 1px solid #a5d6a7;
+}
+
+.alert-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #ffebee;
+  color: #c62828;
+  border-radius: 5px;
+  padding: 12px 16px;
+  font-size: 14px;
+  margin-bottom: 20px;
+  border: 1px solid #ffcdd2;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.forgot-link, .terms-link {
+  font-size: 12px;
+  color: var(--primary-color, #d86b79);
+  text-decoration: underline;
+}
+
+.input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-wrapper input {
+  width: 100%;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--text-main, #333333);
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.input-wrapper input:focus {
+  border-color: var(--primary-dark, #70232f);
+}
+
+.select-role {
+  width: 100%;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--text-main, #333333);
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s ease;
+}
+
+.select-role:focus {
+  border-color: var(--primary-dark, #70232f);
+}
+
+.eye-btn {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  font-size: 12px;
+  color: var(--text-light, #666666);
+}
+
+.form-options {
+  display: flex;
+  align-items: center;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-main, #333333);
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  accent-color: var(--primary-dark, #70232f);
+  width: 16px;
+  height: 16px;
+}
+
+.btn-submit {
+  width: 100%;
+  background-color: var(--primary-dark, #70232f);
+  color: #ffffff;
+  border: none;
+  border-radius: 5px;
+  padding: 12px 20px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  margin-top: 6px;
+  box-shadow: none;
+}
+
+.btn-submit:hover:not(:disabled) {
+  background-color: #581b25;
+}
+
+.btn-submit:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.auth-footer {
+  margin-top: 24px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-light, #666666);
+}
+
+.switch-link {
+  background: none;
+  border: none;
+  color: var(--primary-color, #d86b79);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0 4px;
+  font-size: 14px;
+}
+</style>
+
+----- CreateActivityView.vue -----
+<template>
+  <div class="content-wrapper">
+    <!-- Р’РµСЂС…РЅСЏСЏ РЅР°РІРёРіР°С†РёСЏ -->
+    <div class="top-nav">
+      <router-link to="/profile" class="btn-back">
+        <img :src="getImageUrl('/image/Group3302.svg')" alt="Back" class="icon-sm" /> РќР°Р·Р°Рґ РІ РїСЂРѕС„РёР»СЊ
+      </router-link>
+    </div>
+
+    <!-- Р—Р°РіРѕР»РѕРІРѕРє СЃС‚СЂР°РЅРёС†С‹ -->
+    <div class="page-header">
+
+      <h1 class="page-title">{{ isEdit ? 'Р РµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ РєР°СЂС‚РѕС‡РєРё РєСЂСѓР¶РєР°' : 'РЎРѕР·РґР°РЅРёРµ РЅРѕРІРѕР№ РєР°СЂС‚РѕС‡РєРё РєСЂСѓР¶РєР°' }}</h1>
+      <p class="page-subtitle">{{ isEdit ? 'Р’РЅРµСЃРёС‚Рµ РёР·РјРµРЅРµРЅРёСЏ РІ РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ РІР°С€РµРј РєСЂСѓР¶РєРµ' : 'Р—Р°РїРѕР»РЅРёС‚Рµ РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ РІР°С€РµР№ СЃРµРєС†РёРё РґР»СЏ РїСѓР±Р»РёРєР°С†РёРё РІ РєР°С‚Р°Р»РѕРіРµ KidsConnect' }}</p>
+    </div>
+
+    <!-- Р—Р°РіСЂСѓР·РєР° РґР°РЅРЅС‹С… -->
+    <div v-if="isLoadingData" class="loading-state">
+      <div class="spinner"></div>
+      <span>Р—Р°РіСЂСѓР·РєР° РґР°РЅРЅС‹С… РєСЂСѓР¶РєР°...</span>
+    </div>
+
+    <!-- РћСЃРЅРѕРІРЅР°СЏ С„РѕСЂРјР° -->
+    <form v-else @submit.prevent="submitForm" class="create-card-form">
+      
+      <!-- РЎРµРєС†РёСЏ 1: РћСЃРЅРѕРІРЅС‹Рµ РґР°РЅРЅС‹Рµ -->
+      <div class="form-card-section">
+
+        <h2 class="section-heading"><img :src="getImageUrl('/image/РРЅС„Рѕ.svg')" alt="icon" class="icon" />
+          РћСЃРЅРѕРІРЅР°СЏ РёРЅС„РѕСЂРјР°С†РёСЏ
+        </h2>
+
+        <div class="form-grid">
+          <div class="form-group full-width">
+            <label class="form-label">РќР°Р·РІР°РЅРёРµ РєСЂСѓР¶РєР° / СЃРµРєС†РёРё *</label>
+            <input 
+              v-model="form.title" 
+              type="text" 
+              class="form-input" 
+              placeholder="РЅР°РїСЂРёРјРµСЂ, Р›С‘РіРєР°СЏ Р°С‚Р»РµС‚РёРєР° (РІ Р®Р±РёР»РµР№РЅРѕРј РјРєСЂ.)" 
+              required 
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">РљР°С‚РµРіРѕСЂРёСЏ *</label>
+            <div class="custom-dropdown category-dropdown" ref="categoryDropdownRef">
+              <div class="select-wrapper category-select-wrapper" @click.stop="isCategoryDropdownOpen = !isCategoryDropdownOpen">
+                <span class="select-value">{{ form.category || 'Р’С‹Р±РµСЂРёС‚Рµ РєР°С‚РµРіРѕСЂРёСЋ' }}</span>
+                <img :src="getImageUrl('/image/chevrondown1.svg')" class="select-icon" alt="arrow" />
+              </div>
+              
+              <div class="dropdown-list category-dropdown-list" :class="{ show: isCategoryDropdownOpen }">
+                <div 
+                  v-for="cat in categoryOptions" 
+                  :key="cat" 
+                  class="dropdown-item" 
+                  :class="{ active: form.category === cat }"
+                  @click.stop="selectCategoryOption(cat)"
+                >
+                  {{ cat }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">РџРѕР» (Р¦РµР»РµРІР°СЏ Р°СѓРґРёС‚РѕСЂРёСЏ) *</label>
+            <div class="checkbox-row gap-4 mt-1">
+              <label class="custom-checkbox">
+                <input 
+                  type="checkbox" 
+                  class="hidden-cb" 
+                  v-model="form.gender_male" 
+                />
+                <span class="check-box">
+                  <img v-if="form.gender_male" :src="getImageUrl('/image/check.svg')" alt="check" />
+                </span>
+                <span>РњСѓР¶СЃРєРѕР№</span>
+              </label>
+
+              <label class="custom-checkbox">
+                <input 
+                  type="checkbox" 
+                  class="hidden-cb" 
+                  v-model="form.gender_female" 
+                />
+                <span class="check-box">
+                  <img v-if="form.gender_female" :src="getImageUrl('/image/check.svg')" alt="check" />
+                </span>
+                <span>Р–РµРЅСЃРєРёР№</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Р’РѕР·СЂР°СЃС‚РЅР°СЏ РіСЂСѓРїРїР° *</label>
+            <div class="age-range-row">
+              <span class="range-prefix">РћС‚</span>
+              <input 
+                v-model.number="ageFrom" 
+                type="number" 
+                min="0"
+                max="100"
+                class="form-input age-range-input" 
+                placeholder="10" 
+                required 
+              />
+              <span class="range-separator">Р”Рѕ</span>
+              <input 
+                v-model.number="ageTo" 
+                type="number" 
+                min="0"
+                max="100"
+                class="form-input age-range-input" 
+                placeholder="18" 
+                required 
+              />
+              <span class="range-suffix">Р»РµС‚</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">РђРґСЂРµСЃ РїСЂРѕРІРµРґРµРЅРёСЏ *</label>
+            <input 
+              v-model="form.address" 
+              type="text" 
+              class="form-input" 
+              placeholder="РЅР°РїСЂРёРјРµСЂ, Рі. РСЂРєСѓС‚СЃРє, Р®Р±РёР»РµР№РЅС‹Р№ РјРєСЂ., СЃС‚СЂ. 49/1" 
+              required 
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">РњРµСЃС‚Рѕ / РџР»РѕС‰Р°РґРєР°</label>
+            <input 
+              v-model="form.place" 
+              type="text" 
+              class="form-input" 
+              placeholder="РЅР°РїСЂРёРјРµСЂ, Р¤РћРљ 'Р®Р±РёР»РµР№РЅС‹Р№'" 
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">РЎС‚РѕРёРјРѕСЃС‚СЊ Р·Р°РЅСЏС‚РёР№ *</label>
+            <div class="checkbox-row gap-4">
+              <label class="custom-checkbox">
+                <input 
+                  type="checkbox" 
+                  class="hidden-cb" 
+                  v-model="form.is_free" 
+                  @change="onFreeChange" 
+                />
+                <span class="check-box">
+                  <img v-if="form.is_free" :src="getImageUrl('/image/check.svg')" alt="check" />
+                </span>
+                <span>Р—Р°РЅСЏС‚РёСЏ Р±РµСЃРїР»Р°С‚РЅС‹Рµ</span>
+              </label>
+
+              <label class="custom-checkbox">
+                <input 
+                  type="checkbox" 
+                  class="hidden-cb" 
+                  v-model="form.is_first_free" 
+                />
+                <span class="check-box">
+                  <img v-if="form.is_first_free" :src="getImageUrl('/image/check.svg')" alt="check" />
+                </span>
+                <span>РџРµСЂРІРѕРµ Р±РµСЃРїР»Р°С‚РЅРѕ</span>
+              </label>
+            </div>
+            <div v-if="!form.is_free" class="price-input-row mt-2">
+              <input 
+                v-model.number="priceAmount" 
+                type="number" 
+                min="0"
+                step="1"
+                class="form-input price-number-input" 
+                placeholder="Р’СЃС‚Р°РІСЊС‚Рµ СЃСѓРјРјСѓ (РЅР°РїСЂРёРјРµСЂ, 500)" 
+              />
+              <div class="custom-dropdown price-unit-dropdown" ref="unitDropdownRef">
+                <div class="select-wrapper price-select-wrapper" @click.stop="isUnitDropdownOpen = !isUnitDropdownOpen">
+                  <span class="select-value">{{ priceUnit }}</span>
+                  <img :src="getImageUrl('/image/chevrondown1.svg')" class="select-icon" alt="arrow" />
+                </div>
+                
+                <div class="dropdown-list price-dropdown-list" :class="{ show: isUnitDropdownOpen }">
+                  <div 
+                    v-for="unit in unitOptions" 
+                    :key="unit" 
+                    class="dropdown-item" 
+                    :class="{ active: priceUnit === unit }"
+                    @click.stop="selectUnit(unit)"
+                  >
+                    {{ unit }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">РћР±Р»РѕР¶РєР° РєСЂСѓР¶РєР° (РР·РѕР±СЂР°Р¶РµРЅРёРµ)</label>
+            <div class="file-upload-box">
+              <input type="file" @change="handleFileUpload" accept="image/*" class="file-input" id="cover-file" />
+              
+              <label for="cover-file" class="file-label-btn">
+                <img :src="getImageUrl('/image/Р—Р°РіСЂСѓР·РёС‚СЊ.svg')" alt="icon" class="icon" />
+                Р—Р°РіСЂСѓР·РёС‚СЊ С„Р°Р№Р»
+              </label>
+              <span v-if="isUploading" class="uploading-text">Р—Р°РіСЂСѓР·РєР°...</span>
+              <span v-else-if="form.image_url" class="uploaded-success-text">
+                Р¤Р°Р№Р» РїСЂРёРєСЂРµРїР»РµРЅ
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- РЎРµРєС†РёСЏ 2: Р“СЂСѓРїРїС‹ Рё РїСЂРµРїРѕРґР°РІР°С‚РµР»СЊ -->
+      <div class="form-card-section mt-4">
+        <h2 class="section-heading">
+          Р“СЂСѓРїРїС‹ Рё СЂР°СЃРїРёСЃР°РЅРёРµ
+        </h2>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">РџРѕРґР·Р°РіРѕР»РѕРІРѕРє РіСЂСѓРїРїС‹ / Р­С‚Р°Рї</label>
+            <input 
+              v-model="form.group_subtitle" 
+              type="text" 
+              class="form-input" 
+              placeholder="РЅР°РїСЂРёРјРµСЂ, Р­С‚Р°Рї РЅР°С‡Р°Р»СЊРЅРѕР№ РїРѕРґРіРѕС‚РѕРІРєРё" 
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Р¤РРћ РџСЂРµРїРѕРґР°РІР°С‚РµР»СЏ</label>
+            <input 
+              v-model="form.teacher_name" 
+              type="text" 
+              class="form-input" 
+              placeholder="РЅР°РїСЂРёРјРµСЂ, РџРµС‚СЂРѕРІР° Р•Р»РµРЅР° РђР»РµРєСЃР°РЅРґСЂРѕРІРЅР°" 
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">РљРѕР»РёС‡РµСЃС‚РІРѕ РјРµСЃС‚ РІ РіСЂСѓРїРїРµ (РІСЃРµРіРѕ РјРµСЃС‚)</label>
+            <input 
+              v-model.number="form.total_spots" 
+              type="number" 
+              min="1"
+              max="500"
+              class="form-input" 
+              placeholder="РЅР°РїСЂРёРјРµСЂ, 20" 
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Р”Р»РёС‚РµР»СЊРЅРѕСЃС‚СЊ РїСЂРѕРіСЂР°РјРјС‹</label>
+            <input 
+              v-model="form.duration" 
+              type="text" 
+              class="form-input" 
+              placeholder="РЅР°РїСЂРёРјРµСЂ, 12 РјРµСЃСЏС†РµРІ" 
+            />
+          </div>
+
+          <div class="form-group full-width">
+            <label class="form-label">Р Р°СЃРїРёСЃР°РЅРёРµ Р·Р°РЅСЏС‚РёР№ *</label>
+            
+            <!-- Р”РЅРё РЅРµРґРµР»Рё (7 РєРЅРѕРїРѕРє) -->
+            <div class="days-selector-wrapper">
+              <span class="sub-label">Р’С‹Р±РµСЂРёС‚Рµ РґРЅРё РЅРµРґРµР»Рё:</span>
+              <div class="days-buttons-grid">
+                <button
+                  v-for="day in weekDaysOptions"
+                  :key="day"
+                  type="button"
+                  class="day-btn"
+                  :class="{ active: selectedDays.includes(day) }"
+                  @click="toggleDay(day)"
+                >
+                  {{ day }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Р’СЂРµРјРµРЅРЅС‹Рµ СЏС‡РµР№РєРё -->
+            <div class="time-slots-wrapper mt-3">
+              <span class="sub-label">Р’СЂРµРјСЏ Р·Р°РЅСЏС‚РёР№:</span>
+              <div class="time-slots-list">
+                <div 
+                  v-for="(slot, index) in timeSlots" 
+                  :key="index" 
+                  class="time-slot-item"
+                >
+                  <input 
+                    type="text" 
+                    v-model="slot.value" 
+                    class="form-input time-input" 
+                    placeholder="РЅР°РїСЂРёРјРµСЂ, 08:00 - 10:00" 
+                  />
+                  <button 
+                    v-if="timeSlots.length > 1" 
+                    type="button" 
+                    class="btn-remove-time" 
+                    @click="removeTimeSlot(index)"
+                    title="РЈРґР°Р»РёС‚СЊ СЏС‡РµР№РєСѓ РІСЂРµРјРµРЅРё"
+                  >
+                    Г—
+                  </button>
+                </div>
+              </div>
+
+              <button type="button" class="btn-add-slot mt-2" @click="addTimeSlot">
+                Р”РѕР±Р°РІРёС‚СЊ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅРѕРµ РІСЂРµРјСЏ
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- РЎРµРєС†РёСЏ 3: РћРїРёСЃР°РЅРёРµ Рё РїСЂРѕРіСЂР°РјРјС‹ -->
+      <div class="form-card-section mt-4">
+        <h2 class="section-heading">
+          РћРїРёСЃР°РЅРёРµ Рё РЎРѕРґРµСЂР¶Р°РЅРёРµ РїСЂРѕРіСЂР°РјРјС‹
+        </h2>
+
+        <div class="form-group full-width">
+          <label class="form-label">РћРїРёСЃР°РЅРёРµ РєСЂСѓР¶РєР°</label>
+          <textarea 
+            v-model="form.description" 
+            rows="4" 
+            class="form-input form-textarea" 
+            placeholder="РџРѕРґСЂРѕР±РЅРѕРµ РѕРїРёСЃР°РЅРёРµ РІРёРґР° СЃРїРѕСЂС‚Р°, СЃРµРєС†РёРё РёР»Рё РєСЂСѓР¶РєР°..." 
+          ></textarea>
+        </div>
+
+        <div class="form-group full-width mt-3">
+          <label class="form-label">Р‘Р°Р·РѕРІС‹Р№ СѓСЂРѕРІРµРЅСЊ (С‚РµРєСЃС‚РѕРІРѕРµ РѕРїРёСЃР°РЅРёРµ)</label>
+          <textarea 
+            v-model="form.base_level_info" 
+            rows="5" 
+            class="form-input form-textarea" 
+            placeholder="Р’РІРµРґРёС‚Рµ РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ Р‘Р°Р·РѕРІРѕРј СѓСЂРѕРІРЅРµ (С‡Р°СЃС‹, С‚РµРѕСЂРёРё, РїСЂР°РєС‚РёРєРё, РїСЂРµРґРјРµС‚РЅС‹Рµ РѕР±Р»Р°СЃС‚Рё...)" 
+          ></textarea>
+        </div>
+
+        <div class="form-group full-width mt-3">
+          <label class="form-label">РЈРіР»СѓР±Р»РµРЅРЅС‹Р№ СѓСЂРѕРІРµРЅСЊ (С‚РµРєСЃС‚РѕРІРѕРµ РѕРїРёСЃР°РЅРёРµ)</label>
+          <textarea 
+            v-model="form.advanced_level_info" 
+            rows="5" 
+            class="form-input form-textarea" 
+            placeholder="Р’РІРµРґРёС‚Рµ РёРЅС„РѕСЂРјР°С†РёСЋ РѕР± РЈРіР»СѓР±Р»РµРЅРЅРѕРј СѓСЂРѕРІРЅРµ (СЃРѕСЂРµРІРЅРѕРІР°РЅРёСЏ, СѓСЃР»РѕР¶РЅРµРЅРЅР°СЏ РїРѕРґРіРѕС‚РѕРІРєР°...)" 
+          ></textarea>
+        </div>
+      </div>
+
+      <!-- РћС€РёР±РєР° РїСЂРё РїСѓР±Р»РёРєР°С†РёРё -->
+      <div v-if="errorMsg" class="error-banner mt-3">
+        {{ errorMsg }}
+      </div>
+
+      <!-- РљРЅРѕРїРєРё РґРµР№СЃС‚РІРёР№ -->
+      <div class="form-actions mt-4">
+        <router-link to="/profile" class="btn-cancel">
+          РћС‚РјРµРЅР°
+        </router-link>
+        <button type="submit" class="btn-submit" :disabled="isSubmitting">
+          <span v-if="isSubmitting" class="spinner-sm"></span>
+          <span>{{ isSubmitting ? 'РЎРѕС…СЂР°РЅРµРЅРёРµ...' : (isEdit ? 'РЎРѕС…СЂР°РЅРёС‚СЊ РёР·РјРµРЅРµРЅРёСЏ' : 'РћРїСѓР±Р»РёРєРѕРІР°С‚СЊ РєСЂСѓР¶РѕРє') }}</span>
+        </button>
+      </div>
+
+    </form>
+  </div>
+</template>
+
+<script setup>
+import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import api from '../api'
+import { getImageUrl, parseSchedule } from '../utils'
+
+const router = useRouter()
+const route = useRoute()
+
+const editId = computed(() => route.query.id ? Number(route.query.id) : null)
+const isEdit = computed(() => !!editId.value)
+
+const isSubmitting = ref(false)
+const isUploading = ref(false)
+const isLoadingData = ref(false)
+const errorMsg = ref('')
+
+const isCategoryDropdownOpen = ref(false)
+const categoryDropdownRef = ref(null)
+
+const ageFrom = ref(10)
+const ageTo = ref(18)
+
+const priceAmount = ref(null)
+const priceUnit = ref('СЂСѓР±.')
+const isUnitDropdownOpen = ref(false)
+const unitDropdownRef = ref(null)
+
+const weekDaysOptions = ['РџРЅ', 'Р’С‚', 'РЎСЂ', 'Р§С‚', 'РџС‚', 'РЎР±', 'Р’СЃ']
+const selectedDays = ref(['РџРЅ', 'Р’С‚', 'Р§С‚', 'РЎР±'])
+const timeSlots = ref([{ value: '08:00 - 10:00' }, { value: '18:00 - 19:30' }])
+
+function toggleDay(day) {
+  const idx = selectedDays.value.indexOf(day)
+  if (idx > -1) {
+    selectedDays.value.splice(idx, 1)
+  } else {
+    selectedDays.value.push(day)
+  }
+}
+
+function addTimeSlot() {
+  timeSlots.value.push({ value: '' })
+}
+
+function removeTimeSlot(index) {
+  if (timeSlots.value.length > 1) {
+    timeSlots.value.splice(index, 1)
+  }
+}
+
+const categoryOptions = [
+  'РЎРёР»РѕРІРѕР№ СЃРїРѕСЂС‚',
+  'Р•РґРёРЅРѕР±РѕСЂСЃС‚РІР°',
+  'Р”РџР Рё СЂРµРјРµСЃР»Р°',
+  'РўРµС…РЅРёС‡РµСЃРєРѕРµ РєРѕРЅСЃС‚СЂСѓРёСЂРѕРІР°РЅРёРµ',
+  'РЎР»РѕРІРµСЃРЅРѕСЃС‚СЊ',
+  'РРЅРѕСЃС‚СЂР°РЅРЅС‹Рµ СЏР·С‹РєРё',
+  'Р Р°Р·РІРёС‚РёРµ РёРЅС‚РµР»Р»РµРєС‚Р°',
+  'РРЅС„РѕСЂРјР°С†РёРѕРЅРЅС‹Рµ С‚РµС…РЅРѕР»РѕРіРёРё',
+  'РСЃС‚РѕСЂРёСЏ Рё РўСЂР°РґРёС†РёРё',
+  'РџРµРґР°РіРѕРіРёРєР°',
+  'РњСѓР·С‹РєР° Рё Р·РІСѓРє',
+  'РџРµРЅРёРµ',
+  'РҐРѕСЂРµРѕРіСЂР°С„РёСЏ(С‚Р°РЅС†С‹)',
+  'Р—СЂРµР»РёС‰РЅС‹Рµ РёСЃРєСѓСЃСЃС‚РІР°',
+  'РњРѕРґР° Рё СЃС‚РёР»СЊ',
+  'РџРѕР·РЅР°РІР°С‚РµР»СЊРЅС‹Рµ СЂР°Р·РІР»РµС‡РµРЅРёСЏ',
+  'РўСѓСЂРёР·Рј',
+  'Р•СЃС‚РµСЃС‚РІРµРЅРЅС‹Рµ РЅР°СѓРєРё',
+  'Р›СЋРґРё Рё Р¶РёРІРѕС‚РЅС‹Рµ',
+  'Р­СЃС‚РµС‚РёС‡РµСЃРєРёРµ РІРёРґС‹ СЃРїРѕСЂС‚Р°',
+  'РўРµС…РЅРёС‡РµСЃРєРёРµ РІРёРґС‹ СЃРїРѕСЂС‚Р°',
+  'РљРѕРјР°РЅРґРЅРѕ-РёРіСЂРѕРІРѕР№ СЃРїРѕСЂС‚',
+  'РРЅРґРёРІРёРґСѓР°Р»СЊРЅРѕ РёРіСЂРѕРІРѕР№ СЃРїРѕСЂС‚',
+  'Р’РѕРґРЅС‹Рµ РІРёРґС‹ СЃРїРѕСЂС‚Р°',
+  'Р›С‘РіРєР°СЏ Р°С‚Р»РµС‚РёРєР° Рё РіРёРјРЅР°СЃС‚РёРєР°',
+  'Р¤РёР·РєСѓР»СЊС‚СѓСЂР°'
+]
+
+function selectCategoryOption(cat) {
+  form.category = cat
+  isCategoryDropdownOpen.value = false
+}
+
+function handleCategoryClickOutside(event) {
+  if (categoryDropdownRef.value && !categoryDropdownRef.value.contains(event.target)) {
+    isCategoryDropdownOpen.value = false
+  }
+}
+
+const unitOptions = [
+  'СЂСѓР±.',
+  'СЂСѓР±./РјРµСЃ.',
+  'СЂСѓР±. / Р·Р°РЅСЏС‚РёРµ',
+  'СЂСѓР±. / 8 Р·Р°РЅСЏС‚РёР№',
+  'СЂСѓР±. / 12 Р·Р°РЅСЏС‚РёР№'
+]
+
+function selectUnit(unit) {
+  priceUnit.value = unit
+  isUnitDropdownOpen.value = false
+}
+
+function handleUnitClickOutside(event) {
+  if (unitDropdownRef.value && !unitDropdownRef.value.contains(event.target)) {
+    isUnitDropdownOpen.value = false
+  }
+}
+
+const form = reactive({
+  title: '',
+  category: 'РЎРёР»РѕРІРѕР№ СЃРїРѕСЂС‚',
+  gender_male: true,
+  gender_female: true,
+  age_group: '',
+  address: '',
+  place: '',
+  image_url: '',
+  is_free: false,
+  is_first_free: false,
+  price: '',
+  group_subtitle: '',
+  teacher_name: '',
+  total_spots: 20,
+  spots_info: '',
+  duration: '',
+  schedule: '',
+  description: '',
+  base_level_info: '',
+  advanced_level_info: ''
+})
+
+onMounted(async () => {
+  window.addEventListener('click', handleUnitClickOutside)
+  window.addEventListener('click', handleCategoryClickOutside)
+  if (isEdit.value) {
+    isLoadingData.value = true
+    try {
+      const data = await api.getActivityById(editId.value)
+      form.title = data.title || ''
+      form.category = data.category || 'РЎРёР»РѕРІРѕР№ СЃРїРѕСЂС‚'
+      form.gender_male = data.gender_male !== undefined && data.gender_male !== null ? !!data.gender_male : true
+      form.gender_female = data.gender_female !== undefined && data.gender_female !== null ? !!data.gender_female : true
+      form.age_group = data.age_group || ''
+      if (data.age_group) {
+        const nums = (data.age_group.match(/\d+/g) || []).map(Number)
+        if (nums.length >= 2) {
+          ageFrom.value = nums[0]
+          ageTo.value = nums[1]
+        } else if (nums.length === 1) {
+          ageFrom.value = nums[0]
+          ageTo.value = nums[0]
+        }
+      }
+      form.address = data.address || ''
+      form.place = data.place || ''
+      form.image_url = data.image_url || ''
+      form.is_free = !!data.is_free
+      form.is_first_free = !!data.is_first_free
+      form.price = data.price || ''
+
+      if (data.price && data.price !== 'Р‘РµСЃРїР»Р°С‚РЅРѕ' && data.price !== 'РќРµ СѓРєР°Р·Р°РЅР°') {
+        const match = data.price.match(/\d+/)
+        if (match) {
+          priceAmount.value = Number(match[0])
+          const remaining = data.price.replace(match[0], '').trim()
+          if (remaining) priceUnit.value = remaining
+        }
+      }
+
+      if (data.schedule) {
+        form.schedule = data.schedule
+        const parsed = parseSchedule(data.schedule)
+        const parsedDays = weekDaysOptions.filter(d => parsed.days.includes(d))
+        if (parsedDays.length > 0) {
+          selectedDays.value = parsedDays
+        }
+        if (parsed.slots.length > 0) {
+          timeSlots.value = parsed.slots.map(s => ({ value: s }))
+        }
+      }
+
+      form.group_subtitle = data.group_subtitle || ''
+      form.teacher_name = data.teacher_name || ''
+      form.total_spots = data.total_spots !== undefined && data.total_spots !== null ? data.total_spots : 20
+      form.spots_info = data.spots_info || ''
+      form.duration = data.duration || ''
+      form.description = data.description || ''
+      form.base_level_info = data.base_level_info || ''
+      form.advanced_level_info = data.advanced_level_info || ''
+    } catch (err) {
+      errorMsg.value = err.message || 'РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РґР°РЅРЅС‹Рµ РєСЂСѓР¶РєР°'
+    } finally {
+      isLoadingData.value = false
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', handleUnitClickOutside)
+  window.removeEventListener('click', handleCategoryClickOutside)
+})
+
+
+
+function onFreeChange() {
+  if (form.is_free) {
+    form.price = 'Р‘РµСЃРїР»Р°С‚РЅРѕ'
+    priceAmount.value = null
+  }
+}
+
+async function handleFileUpload(event) {
+  const file = event.target.files[0]
+  if (!file) return
+  isUploading.value = true
+  try {
+    const uploadedUrl = await api.uploadImage(file)
+    form.image_url = uploadedUrl
+  } catch (err) {
+    errorMsg.value = err.message || 'РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё С„Р°Р№Р»Р°'
+  } finally {
+    isUploading.value = false
+  }
+}
+
+async function submitForm() {
+  isSubmitting.value = true
+  errorMsg.value = ''
+  try {
+    let computedPrice = 'Р‘РµСЃРїР»Р°С‚РЅРѕ'
+    if (!form.is_free) {
+      if (priceAmount.value !== null && priceAmount.value !== '') {
+        computedPrice = `${priceAmount.value} ${priceUnit.value}`
+      } else {
+        computedPrice = 'РќРµ СѓРєР°Р·Р°РЅР°'
+      }
+    }
+
+    const daysStr = selectedDays.value.join(', ')
+    const validSlots = timeSlots.value.map(s => s.value.trim()).filter(Boolean)
+    const slotsStr = validSlots.join(', ')
+    const finalSchedule = [daysStr, slotsStr].filter(Boolean).join(' ')
+
+    let computedAgeGroup = '10-18 Р»РµС‚'
+    if (ageFrom.value !== null && ageFrom.value !== '' && ageTo.value !== null && ageTo.value !== '') {
+      if (Number(ageFrom.value) === Number(ageTo.value)) {
+        computedAgeGroup = `${ageFrom.value} Р»РµС‚`
+      } else {
+        computedAgeGroup = `${ageFrom.value}-${ageTo.value} Р»РµС‚`
+      }
+    } else if (ageFrom.value !== null && ageFrom.value !== '') {
+      computedAgeGroup = `РѕС‚ ${ageFrom.value} Р»РµС‚`
+    } else if (ageTo.value !== null && ageTo.value !== '') {
+      computedAgeGroup = `РґРѕ ${ageTo.value} Р»РµС‚`
+    }
+
+    const payload = {
+      title: form.title,
+      category: form.category,
+      gender_male: form.gender_male,
+      gender_female: form.gender_female,
+      age_group: computedAgeGroup,
+      address: form.address,
+      place: form.place,
+      image_url: form.image_url || '/image/Group330.svg',
+      is_free: form.is_free,
+      is_first_free: form.is_first_free,
+      price: computedPrice,
+      group_subtitle: form.group_subtitle,
+      teacher_name: form.teacher_name,
+      total_spots: form.total_spots ? Number(form.total_spots) : 20,
+      duration: form.duration,
+      schedule: finalSchedule,
+      description: form.description,
+      base_level_info: form.base_level_info,
+      advanced_level_info: form.advanced_level_info
+    }
+    
+    if (isEdit.value) {
+      await api.updateActivity(editId.value, payload)
+      router.push(`/detail?id=${editId.value}`)
+    } else {
+      const created = await api.createActivity(payload)
+      router.push(`/detail?id=${created.id}`)
+    }
+  } catch (err) {
+    errorMsg.value = err.message || 'РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ РєСЂСѓР¶РѕРє'
+  } finally {
+    isSubmitting.value = false
+  }
+}
+</script>
+
+<style scoped>
+.content-wrapper {
+  width: 100%;
+}
+
+.top-nav {
+  margin-bottom: 20px;
+}
+
+.btn-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-color, #ffffff);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.btn-back:hover {
+  background: #e0e0e0;
+}
+
+.icon-sm {
+  width: 16px;
+  height: 16px;
+}
+
+
+.page-header {
+  margin-bottom: 20px;
+}
+
+.page-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: #2F050F;
+  margin: 0 0 6px 0;
+}
+
+.page-subtitle {
+  font-size: 15px;
+  color: var(--text-light, #666666);
+  margin: 0;
+}
+
+.create-card-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.form-card-section {
+  background: var(--bg-color, #ffffff);
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  text-transform: uppercase;
+  margin: 0 0 20px 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+}
+
+.full-width {
+  grid-column: 1 / -1;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.form-input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  font-size: 14px;
+  color: var(--text-main, #333333);
+  background-color: #ffffff;
+  transition: all 0.2s ease;
+  box-sizing: border-box;
+}
+
+select.form-input {
+  cursor: pointer;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--primary-dark, #70232f);
+}
+
+.form-textarea {
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.file-upload-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-input {
+  display: none;
+}
+
+.file-label-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-wrapper, #efefef);
+  border: 1px solid #d1d5db;
+  padding: 10px 16px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.file-label-btn:hover {
+  background: #e5e7eb;
+}
+
+.uploading-text {
+  font-size: 13px;
+  color: var(--primary-dark, #70232f);
+  font-weight: 600;
+}
+
+.uploaded-success-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: #059669;
+  font-weight: 600;
+}
+
+.error-banner {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 12px 16px;
+  border-radius: 5px;
+  font-weight: 600;
+  font-size: 14px;
+  border: 1px solid #fca5a5;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 16px;
+  background: var(--bg-color, #ffffff);
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  padding: 20px;
+  box-shadow: none;
+}
+
+.btn-cancel {
+  background: var(--bg-color, #ffffff);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.btn-cancel:hover {
+  background: #e0e0e0;
+}
+
+.btn-submit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--primary-dark, #70232f);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #ffffff;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: none;
+}
+
+.btn-submit:hover:not(:disabled) {
+  background: #581b25;
+}
+
+.btn-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.spinner-sm {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 0.8s infinite linear;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.mt-2 { margin-top: 8px; }
+.mt-3 { margin-top: 12px; }
+.mt-4 { margin-top: 20px; }
+.gap-4 { gap: 16px; flex-wrap: wrap; }
+
+.category-dropdown {
+  position: relative;
+  width: 100%;
+}
+
+.category-select-wrapper {
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  padding: 10px 14px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: border-color 0.2s ease;
+}
+
+.category-select-wrapper:hover {
+  border-color: var(--primary-dark, #70232f);
+}
+
+.category-dropdown-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 100%;
+  max-height: 240px;
+  background: #ffffff;
+  border-radius: 5px;
+  box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.1);
+  overflow-y: auto;
+  z-index: 100;
+  padding: 4px 0;
+}
+
+.age-range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.range-prefix,
+.range-separator,
+.range-suffix {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  white-space: nowrap;
+}
+
+.age-range-input {
+  flex: 1;
+  min-width: 60px;
+}
+
+.price-input-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.price-number-input {
+  flex: 1;
+}
+
+.price-unit-dropdown {
+  width: 190px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.price-select-wrapper {
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  padding: 10px 14px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: border-color 0.2s ease;
+}
+
+.price-select-wrapper:hover {
+  border-color: var(--primary-dark, #70232f);
+}
+
+.price-dropdown-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 100%;
+  max-height: 220px;
+  background: #ffffff;
+  border-radius: 5px;
+  box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.1);
+  overflow-y: auto;
+  z-index: 100;
+  padding: 4px 0;
+}
+
+.sub-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+  margin-bottom: 8px;
+}
+
+.days-buttons-grid {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.day-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 5px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: var(--text-main, #333333);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.day-btn:hover {
+  border-color: var(--primary-dark, #70232f);
+  color: var(--primary-dark, #70232f);
+  background: #fce8eb;
+}
+
+.day-btn.active {
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  border-color: var(--primary-dark, #70232f);
+  box-shadow: none;
+}
+
+.time-slots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.time-slot-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.time-input {
+  max-width: 320px;
+}
+
+.btn-remove-time {
+  background: #fef2f2;
+  border: 1px solid #fee2e2;
+  color: #dc2626;
+  width: 40px;
+  height: 40px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.btn-remove-time:hover {
+  background: #dc2626;
+  color: #ffffff;
+  border-color: #dc2626;
+}
+
+.btn-add-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fce8eb;
+  color: var(--primary-dark, #70232f);
+  border: 1px solid #f8c8d0;
+  padding: 8px 14px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-add-slot:hover {
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  border-color: var(--primary-dark, #70232f);
+}
+
+@media (max-width: 768px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+  .price-input-row {
+    flex-direction: column;
+  }
+  .price-unit-dropdown {
+    width: 100%;
+  }
+  .time-input {
+    max-width: 100%;
+  }
+}
+</style>
+
+----- DetailView.vue -----
+<template>
+  <div class="content-wrapper">
+    <!-- Р’РµСЂС…РЅСЏСЏ РЅР°РІРёРіР°С†РёСЏ -->
+    <div class="top-nav">
+      <router-link to="/" class="nav-btn">
+        <img :src="getImageUrl('/image/Group3302.svg')" alt="Back" class="icon-sm" /> РќР°Р·Р°Рґ
+      </router-link>
+      <button class="nav-btn">
+        РќР° РєР°СЂС‚Рµ <img :src="getImageUrl('/image/Group.svg')" alt="Map" class="icon-sm" />
+      </button>
+    </div>
+
+    <!-- Р—Р°РіРѕР»РѕРІРѕРє СЃС‚СЂР°РЅРёС†С‹ -->
+    <h1 class="page-title">{{ activity?.title || 'Р›С‘РіРєР°СЏ Р°С‚Р»РµС‚РёРєР° (РІ Р®Р±РёР»РµР№РЅРѕРј РјРєСЂ.)' }}</h1>
+
+    <!-- Р“Р»Р°РІРЅР°СЏ РєР°СЂС‚РѕС‡РєР° СЃ РґРµС‚Р°Р»СЏРјРё -->
+    <section class="detail-section">
+      <div class="detail-main">
+        <!-- РљР°СЂС‚РёРЅРєР° -->
+        <div 
+          class="detail-image" 
+          :style="{ backgroundImage: `url('${getImageUrl(activity?.image_url || '/image/Group330.svg')}')` }"
+        ></div>
+
+        <div class="detail-info">
+          <div class="detail-badges">
+            <span class="badge badge-outline" v-if="activity?.is_first_free">РџРµСЂРІРѕРµ Р±РµСЃРїР»Р°С‚РЅРѕ</span>
+            <span class="badge badge-closed" v-if="isFull">РќР°Р±РѕСЂ Р·Р°РєСЂС‹С‚</span>
+            <span class="badge badge-outline" v-else>РќР°Р±РѕСЂ РѕС‚РєСЂС‹С‚</span>
+            <span class="badge badge-free font-semibold">{{ activity?.is_free ? 'Р‘РµСЃРїР»Р°С‚РЅРѕ' : (activity?.price || 'Р‘РµСЃРїР»Р°С‚РЅРѕ') }}</span>
+          </div>
+
+          <div class="detail-info-rows">
+            <div class="info-row">
+              <img :src="getImageUrl('/image/Frame397.svg')" class="icon" alt="age" />
+              <span>{{ activity?.age_group || '10-18 Р»РµС‚' }}</span>
+            </div>
+            <div class="info-row">
+              <img :src="getImageUrl('/image/layer1.svg')" class="icon" alt="address" />
+              <span>{{ activity?.address || 'Рі. РСЂРєСѓС‚СЃРє, Р®Р±РёР»РµР№РЅС‹Р№ РјРєСЂ., СЃС‚СЂ. 49/1' }}</span>
+            </div>
+            <div class="info-row" v-if="activity?.place">
+              <img :src="getImageUrl('/image/Group.svg')" class="icon" alt="location" />
+              <span class="font-medium">{{ activity.place }}</span>
+            </div>
+          </div>
+
+          <div class="enroll-action-wrapper">
+            <span v-if="isFull" class="closed-notice">РќР°Р±РѕСЂ Р·Р°РєСЂС‹С‚</span>
+            <button 
+              class="btn-main" 
+              :class="{ 'btn-disabled': isFull }" 
+              :disabled="isFull" 
+              @click="handleEnroll"
+            >
+              Р—Р°РїРёСЃР°С‚СЊСЃСЏ
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- РЎРµРєС†РёСЏ: Р“СЂСѓРїРїС‹ Рё Р Р°СЃРїРёСЃР°РЅРёРµ  -->
+    <section class="detail-section">
+      <div class="groups-schedule-wrapper">
+        <!-- Р›РµРІР°СЏ РєРѕР»РѕРЅРєР°: Р“СЂСѓРїРїС‹ -->
+        <div class="groups-column">
+          <h2 class="section-title">Р“Р РЈРџРџР«</h2>
+          <h3 class="group-subtitle">{{ activity?.group_subtitle || 'Р­С‚Р°Рї РЅР°С‡Р°Р»СЊРЅРѕР№ РїРѕРґРіРѕС‚РѕРІРєРё' }}</h3>
+          <div class="group-stats">
+            <div class="stat-item" v-if="activity?.teacher_name">
+              <img :src="getImageUrl('/image/educationcapsvgrepocom1.svg')" class="icon" alt="teacher" />
+              <span>{{ activity.teacher_name }}</span>
+            </div>
+            <div class="stat-item" v-if="spotsDisplay">
+              <img :src="getImageUrl('/image/GroupMan.svg')" class="icon" alt="spots" />
+              <span>{{ spotsDisplay }}</span>
+            </div>
+            <div class="stat-item" v-if="activity?.duration">
+              <img :src="getImageUrl('/image/Group331.svg')" class="icon" alt="duration" />
+              <span>{{ activity.duration }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- РџСЂР°РІР°СЏ РєРѕР»РѕРЅРєР° Р Р°СЃРїРёСЃР°РЅРёРµ -->
+        <div class="schedule-column">
+          <h2 class="section-title">Р РђРЎРџРРЎРђРќРР• Р—РђРќРЇРўРР™</h2>
+          <div class="schedule-grid">
+            <div class="schedule-row">
+              <img :src="getImageUrl('/image/clock_time_icon_1429031.svg')" class="icon" alt="clock" />
+              <span class="schedule-days">{{ parsedSchedule.days }}</span>
+              <span 
+                v-for="(slot, idx) in parsedSchedule.slots" 
+                :key="idx" 
+                class="time-slot"
+              >
+                {{ slot }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- РЎРµРєС†РёСЏ РћРїРёСЃР°РЅРёРµ -->
+    <section class="detail-section">
+      <h2 class="section-title">РћРџРРЎРђРќРР•</h2>
+      <p class="description-text">
+        {{ activity?.description || 'Р›РµРіРєР°СЏ Р°С‚Р»РµС‚РёРєР° - РѕР»РёРјРїРёР№СЃРєРёР№ РІРёРґ СЃРїРѕСЂС‚Р°, РѕР±СЉРµРґРёРЅСЏСЋС‰РёР№ Р±РµРіРѕРІС‹Рµ РІРёРґС‹, СЃРїРѕСЂС‚РёРІРЅСѓСЋ С…РѕРґСЊР±Сѓ, С‚РµС…РЅРёС‡РµСЃРєРёРµ РІРёРґС‹ (РїСЂС‹Р¶РєРё Рё РјРµС‚Р°РЅРёСЏ), РјРЅРѕРіРѕР±РѕСЂСЊСЏ, РїСЂРѕР±РµРіРё (Р±РµРі РїРѕ С€РѕСЃСЃРµ), РєСЂРѕСЃСЃС‹ (Р±РµРі РїРѕ РїРµСЂРµСЃРµС‡РµРЅРЅРѕР№ РјРµСЃС‚РЅРѕСЃС‚Рё).' }}
+      </p>
+    </section>
+
+    <!-- РЎРµРєС†РёСЏ РЎРѕРґРµСЂР¶Р°РЅРёРµ РїСЂРѕРіСЂР°РјРјС‹ (РђРєРєРѕСЂРґРµРѕРЅ) -->
+    <section class="detail-section accordion-section">
+      <h2 class="section-title">РЎРћР”Р•Р Р–РђРќРР• РџР РћР“Р РђРњРњР«</h2>
+
+      <div class="accordion-container">
+        <!-- РЈСЂРѕРІРµРЅСЊ 1: Р‘Р°Р·РѕРІС‹Р№ СѓСЂРѕРІРµРЅСЊ -->
+        <div 
+          class="accordion-item" 
+          :class="{ active: openAccordions.includes(1) }"
+          @click="toggleAccordion(1)"
+        >
+          <div class="accordion-header">
+            <h3 class="accordion-title">Р‘Р°Р·РѕРІС‹Р№ СѓСЂРѕРІРµРЅСЊ</h3>
+            <img :src="getImageUrl('/image/Group3300.svg')" class="chevron" alt="chevron" />
+          </div>
+          <div class="accordion-content">
+            <div v-if="activity?.base_level_info" class="formatted-text">
+              {{ activity.base_level_info }}
+            </div>
+            <template v-else>
+              <p>Р‘Р°Р·РѕРІС‹Р№ СѓСЂРѕРІРµРЅСЊ СЃР»РѕР¶РЅРѕСЃС‚Рё РїРµСЂРІС‹Р№-РІС‚РѕСЂРѕР№ РіРѕРґ РѕР±СѓС‡РµРЅРёСЏ, 252 С‡Р°СЃР°.</p>
+              <ul>
+                <li>РћР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ РїСЂРµРґРјРµС‚С‹ РѕР±Р»Р°СЃС‚Рё (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ вЂ“ 15);</li>
+                <li>Р’Р°СЂРёР°С‚РёРІРЅС‹Рµ РїСЂРµРґРјРµС‚РЅС‹Рµ РѕР±Р»Р°СЃС‚Рё (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’10);</li>
+                <li>РўРµРѕСЂРёСЏ (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’5);</li>
+                <li>РџСЂР°РєС‚РёРєР° (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 216);</li>
+                <li>РЎР°РјРѕСЃС‚РѕСЏС‚РµР»СЊРЅР°СЏ СЂР°Р±РѕС‚Р° (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’2);</li>
+                <li>РђС‚С‚РµСЃС‚Р°С†РёСЏ (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 4).</li>
+              </ul>
+              <p>Р‘Р°Р·РѕРІС‹Р№ СѓСЂРѕРІРµРЅСЊ СЃР»РѕР¶РЅРѕСЃС‚Рё С‚СЂРµС‚РёР№-С‡РµС‚РІРµСЂС‚С‹Р№ РіРѕРґ РѕР±СѓС‡РµРЅРёСЏ, 416 С‡Р°СЃРѕРІ.</p>
+              <ul>
+                <li>РћР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ РїСЂРµРґРјРµС‚С‹ РѕР±Р»Р°СЃС‚Рё (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 25);</li>
+                <li>Р’Р°СЂРёР°С‚РёРІРЅС‹Рµ РїСЂРµРґРјРµС‚РЅС‹Рµ РѕР±Р»Р°СЃС‚Рё (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 15);</li>
+                <li>РўРµРѕСЂРёСЏ (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 7);</li>
+                <li>РџСЂР°РєС‚РёРєР° (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 4);</li>
+                <li>РЎР°РјРѕСЃС‚РѕСЏС‚РµР»СЊРЅР°СЏ СЂР°Р±РѕС‚Р° (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 4);</li>
+                <li>РђС‚С‚РµСЃС‚Р°С†РёСЏ (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 4).</li>
+              </ul>
+            </template>
+          </div>
+        </div>
+
+        <!-- РЈСЂРѕРІРµРЅСЊ 2: РЈРіР»СѓР±Р»РµРЅРЅС‹Р№ СѓСЂРѕРІРµРЅСЊ -->
+        <div 
+          class="accordion-item" 
+          :class="{ active: openAccordions.includes(2) }"
+          @click="toggleAccordion(2)"
+        >
+          <div class="accordion-header">
+            <h3 class="accordion-title">РЈРіР»СѓР±Р»РµРЅРЅС‹Р№ СѓСЂРѕРІРµРЅСЊ</h3>
+            <img :src="getImageUrl('/image/Group3300.svg')" class="chevron" alt="chevron" />
+          </div>
+          <div class="accordion-content">
+            <div v-if="activity?.advanced_level_info" class="formatted-text">
+              {{ activity.advanced_level_info }}
+            </div>
+            <template v-else>
+              <p>РЈРіР»СѓР±Р»РµРЅРЅС‹Р№ СѓСЂРѕРІРµРЅСЊ СЃР»РѕР¶РЅРѕСЃС‚Рё РїРµСЂРІС‹Р№-РІС‚РѕСЂРѕР№ РіРѕРґ РѕР±СѓС‡РµРЅРёСЏ, 504 С‡Р°СЃР°.</p>
+              <ul>
+                <li>РћР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ РїСЂРµРґРјРµС‚С‹ РѕР±Р»Р°СЃС‚Рё (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 30);</li>
+                <li>Р’Р°СЂРёР°С‚РёРІРЅС‹Рµ РїСЂРµРґРјРµС‚РЅС‹Рµ РѕР±Р»Р°СЃС‚Рё (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 20);</li>
+                <li>РўРµРѕСЂРёСЏ (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 9);</li>
+                <li>РџСЂР°РєС‚РёРєР° (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 433);</li>
+                <li>РЎР°РјРѕСЃС‚РѕСЏС‚РµР»СЊРЅР°СЏ СЂР°Р±РѕС‚Р° (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 8);</li>
+                <li>РђС‚С‚РµСЃС‚Р°С†РёСЏ (РєРѕР»РёС‡РµСЃС‚РІРѕ С‡Р°СЃРѕРІ в€’ 4).</li>
+              </ul>
+            </template>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- РЎРµРєС†РёСЏ РћС‚Р·С‹РІС‹ -->
+    <section class="detail-section reviews-section">
+      <h2 class="section-title">РћРўР—Р«Р’Р«</h2>
+
+      <!-- Р¤РѕСЂРјР° РґРѕР±Р°РІР»РµРЅРёСЏ РѕС‚Р·С‹РІР° (РґРѕСЃС‚СѓРїРЅР° С‚РѕР»СЊРєРѕ Р°РІС‚РѕСЂРёР·РѕРІР°РЅРЅС‹Рј, РµСЃР»Рё РѕС‚Р·С‹РІ РµС‰Рµ РЅРµ РѕСЃС‚Р°РІР»РµРЅ) -->
+      <div v-if="authStore.isAuthenticated.value">
+        <div v-if="hasUserReviewed" class="already-reviewed-box">
+          <p>Р’С‹ СѓР¶Рµ РѕСЃС‚Р°РІРёР»Рё РѕС‚Р·С‹РІ Рє СЌС‚РѕРјСѓ РєСЂСѓР¶РєСѓ.</p>
+        </div>
+
+        <div v-else class="add-review-box">
+          <h3 class="add-review-title">РћСЃС‚Р°РІРёС‚СЊ РѕС‚Р·С‹РІ</h3>
+          <form @submit.prevent="submitReview" class="review-form">
+            <div class="rating-picker">
+              <span class="rating-label">РћС†РµРЅРєР°:</span>
+              <div class="stars-selectable">
+                <button 
+                  v-for="star in 5" 
+                  :key="star" 
+                  type="button" 
+                  class="star-btn"
+                  @click="newReview.rating = star"
+                  :aria-label="`РћС†РµРЅРєР° ${star}`"
+                >
+                  <svg width="22" height="22" viewBox="0 0 24 24" :fill="star <= newReview.rating ? '#FFB800' : '#E5E7EB'" stroke="#FFB800" stroke-width="1.5">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <textarea 
+                v-model="newReview.text" 
+                class="form-input review-textarea" 
+                rows="3" 
+                placeholder="РџРѕРґРµР»РёС‚РµСЃСЊ РІР°С€РёРј РІРїРµС‡Р°С‚Р»РµРЅРёРµРј Рѕ Р·Р°РЅСЏС‚РёСЏС… РІ РєСЂСѓР¶РєРµ..." 
+                required
+              ></textarea>
+            </div>
+
+            <div v-if="reviewError" class="error-banner">
+              {{ reviewError }}
+            </div>
+
+            <div v-if="reviewSuccess" class="success-banner-inline">
+              {{ reviewSuccess }}
+            </div>
+
+            <button type="submit" class="btn-submit" :disabled="isSubmittingReview">
+              {{ isSubmittingReview ? 'РџСѓР±Р»РёРєР°С†РёСЏ...' : 'РћС‚РїСЂР°РІРёС‚СЊ РѕС‚Р·С‹РІ' }}
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- РџСЂРёРіР»Р°С€РµРЅРёРµ Рє Р°РІС‚РѕСЂРёР·Р°С†РёРё, РµСЃР»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ Р°РІС‚РѕСЂРёР·РѕРІР°РЅ -->
+      <div v-else class="auth-prompt-box">
+        <p>Р’РѕР№РґРёС‚Рµ РІ СЃРёСЃС‚РµРјСѓ, С‡С‚РѕР±С‹ РѕСЃС‚Р°РІРёС‚СЊ РѕС‚Р·С‹РІ Рѕ РєСЂСѓР¶РєРµ.</p>
+        <router-link to="/auth" class="btn-auth-link">Р’РѕР№С‚Рё</router-link>
+      </div>
+
+
+      <!-- РЎРїРёСЃРѕРє РѕС‚Р·С‹РІРѕРІ -->
+      <div class="reviews-list">
+        <div v-if="loadingReviews" class="reviews-loading">
+          Р—Р°РіСЂСѓР·РєР° РѕС‚Р·С‹РІРѕРІ...
+        </div>
+
+        <div v-else-if="reviews.length === 0" class="no-reviews">
+          РћС‚Р·С‹РІРѕРІ РїРѕРєР° РЅРµС‚. Р‘СѓРґСЊС‚Рµ РїРµСЂРІС‹Рј, РєС‚Рѕ РѕСЃС‚Р°РІРёС‚ РѕС‚Р·С‹РІ!
+        </div>
+
+        <div v-else class="reviews-grid">
+          <div v-for="rev in reviews" :key="rev.id" class="review-card">
+            <div class="review-header">
+              <div class="author-info">
+                <span class="author-name">{{ rev.user?.name || 'Р РѕРґРёС‚РµР»СЊ' }}</span>
+                <span class="review-date">{{ rev.created_at || '' }}</span>
+              </div>
+              <div class="stars-display">
+                <svg 
+                  v-for="star in 5" 
+                  :key="star" 
+                  width="16" 
+                  height="16" 
+                  viewBox="0 0 24 24" 
+                  :fill="star <= rev.rating ? '#FFB800' : '#E5E7EB'" 
+                  stroke="#FFB800" 
+                  stroke-width="1.5"
+                >
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+              </div>
+            </div>
+            <p class="review-text">{{ rev.text }}</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- РњРѕРґР°Р»СЊРЅРѕРµ РѕРєРЅРѕ Р·Р°РїРёСЃРё -->
+    <transition name="fade">
+      <div v-if="showModal" class="modal-backdrop" @click.self="showModal = false">
+
+        <div class="modal-card">
+          <div class="modal-header">
+            <h3 class="modal-title">Р—Р°РїРёСЃСЊ РІ РєСЂСѓР¶РѕРє</h3>
+            <button class="btn-close" @click="showModal = false" aria-label="Р—Р°РєСЂС‹С‚СЊ">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+
+          <div v-if="successMsg" class="success-banner">
+            <p>{{ successMsg }}</p>
+            <router-link to="/profile" class="btn-view-profile">РџРµСЂРµР№С‚Рё РІ РїСЂРѕС„РёР»СЊ</router-link>
+          </div>
+
+          <form v-else @submit.prevent="submitBooking" class="modal-form">
+            <p class="modal-subtitle">Р—Р°РїРѕР»РЅРёС‚Рµ РґР°РЅРЅС‹Рµ РґР»СЏ РѕС‚РїСЂР°РІРєРё Р·Р°СЏРІРєРё</p>
+
+            <div class="form-group">
+              <label class="form-label">Р¤РРћ Р РѕРґРёС‚РµР»СЏ</label>
+              <input 
+                v-model="form.parent_name" 
+                type="text" 
+                class="form-input" 
+                placeholder="РЅР°РїСЂРёРјРµСЂ, РРІР°РЅРѕРІ РРІР°РЅ РРІР°РЅРѕРІРёС‡" 
+                required 
+              />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">РРјСЏ СЂРµР±РµРЅРєР°</label>
+              <input 
+                v-model="form.child_name" 
+                type="text" 
+                class="form-input" 
+                placeholder="РЅР°РїСЂРёРјРµСЂ, РђР»РµРєСЃРµР№" 
+                required 
+              />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Р’РѕР·СЂР°СЃС‚ СЂРµР±РµРЅРєР°</label>
+              <input 
+                v-model.number="form.child_age" 
+                type="number" 
+                min="1" 
+                max="18" 
+                class="form-input" 
+                placeholder="РЅР°РїСЂРёРјРµСЂ, 10" 
+                required 
+              />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">РљРѕРЅС‚Р°РєС‚РЅС‹Р№ С‚РµР»РµС„РѕРЅ</label>
+              <input 
+                v-model="form.phone" 
+                type="tel" 
+                class="form-input" 
+                placeholder="+7 (900) 000-00-00" 
+                required 
+              />
+            </div>
+
+            <div v-if="errorMsg" class="error-banner">
+              {{ errorMsg }}
+            </div>
+
+            <div class="modal-actions">
+              <button type="button" class="btn-cancel" @click="showModal = false">РћС‚РјРµРЅР°</button>
+              <button type="submit" class="btn-submit" :disabled="isSubmitting">
+                {{ isSubmitting ? 'РћС‚РїСЂР°РІРєР°...' : 'РћС‚РїСЂР°РІРёС‚СЊ Р·Р°СЏРІРєСѓ' }}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </transition>
+
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { authStore } from '../authStore'
+import api from '../api'
+import { getImageUrl, parseSchedule } from '../utils'
+
+const route = useRoute()
+const activityId = computedId()
+
+function computedId() {
+  const q = route.query.id
+  return q ? Number(q) : 1
+}
+
+const activity = ref(null)
+const loadingActivity = ref(true)
+
+const spotsDisplay = computed(() => {
+  if (!activity.value) return ''
+  if (activity.value.spots_info) return activity.value.spots_info
+  const accepted = activity.value.accepted_bookings_count ?? 0
+  const total = activity.value.total_spots ?? 20
+  return `${accepted} РёР· ${total}`
+})
+
+const isFull = computed(() => {
+  if (!activity.value) return false
+  const accepted = activity.value.accepted_bookings_count ?? 0
+  const total = activity.value.total_spots ?? 20
+  return total > 0 && accepted >= total
+})
+
+const parsedSchedule = computed(() => {
+  return parseSchedule(activity.value?.schedule)
+})
+
+// РџРµСЂРµРјРµРЅРЅС‹Рµ РѕС‚Р·С‹РІРѕРІ
+const reviews = ref([])
+const loadingReviews = ref(true)
+
+// РџСЂРѕРІРµСЂРєР°: РѕСЃС‚Р°РІР»СЏР» Р»Рё С‚РµРєСѓС‰РёР№ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СѓР¶Рµ РѕС‚Р·С‹РІ
+const hasUserReviewed = computed(() => {
+  if (!authStore.isAuthenticated.value || !authStore.user.value) return false
+  const currentUserId = authStore.user.value.id
+  return reviews.value.some(r => r.user_id === currentUserId || r.user?.id === currentUserId)
+})
+
+const newReview = reactive({
+  rating: 5,
+  text: ''
+})
+
+const isSubmittingReview = ref(false)
+const reviewError = ref('')
+const reviewSuccess = ref('')
+
+async function loadReviews() {
+  loadingReviews.value = true
+  try {
+    const list = await api.getReviews(activity.value?.id || activityId)
+    reviews.value = list || []
+  } catch (e) {
+    console.warn('РћС€РёР±РєР° РїСЂРё Р·Р°РіСЂСѓР·РєРµ РѕС‚Р·С‹РІРѕРІ:', e)
+    reviews.value = []
+  } finally {
+    loadingReviews.value = false
+  }
+}
+
+async function submitReview() {
+  if (!newReview.text.trim()) {
+    reviewError.value = 'РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РІРІРµРґРёС‚Рµ С‚РµРєСЃС‚ РѕС‚Р·С‹РІР°'
+    return
+  }
+  isSubmittingReview.value = true
+  reviewError.value = ''
+  reviewSuccess.value = ''
+  try {
+    const reviewData = {
+      rating: newReview.rating,
+      text: newReview.text.trim(),
+      activity_id: activity.value?.id || activityId
+    }
+    await api.createReview(reviewData)
+    newReview.text = ''
+    newReview.rating = 5
+    reviewSuccess.value = 'Р’Р°С€ РѕС‚Р·С‹РІ СѓСЃРїРµС€РЅРѕ РѕРїСѓР±Р»РёРєРѕРІР°РЅ!'
+    await loadReviews()
+  } catch (err) {
+    reviewError.value = err.message || 'РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ РѕС‚Р·С‹РІ'
+  } finally {
+    isSubmittingReview.value = false
+  }
+}
+
+onMounted(async () => {
+  try {
+    activity.value = await api.getActivityById(activityId)
+  } catch (e) {
+    console.warn('РСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рµ РґР°РЅРЅС‹Рµ РєСЂСѓР¶РєР°:', e)
+  } finally {
+    loadingActivity.value = false
+  }
+  await loadReviews()
+})
+
+
+
+
+// РЎРїРёСЃРѕРє РѕС‚РєСЂС‹С‚С‹С… СЃРµРєС†РёР№ Р°РєРєРѕСЂРґРµРѕРЅР° РїСЂРѕРіСЂР°РјРјС‹
+const openAccordions = ref([1])
+
+function toggleAccordion(id) {
+  const index = openAccordions.value.indexOf(id)
+  if (index > -1) {
+    openAccordions.value.splice(index, 1)
+  } else {
+    openAccordions.value.push(id)
+  }
+}
+
+// РџРµСЂРµРјРµРЅРЅС‹Рµ РјРѕРґР°Р»СЊРЅРѕРіРѕ РѕРєРЅР°
+const showModal = ref(false)
+const isSubmitting = ref(false)
+const errorMsg = ref('')
+const successMsg = ref('')
+
+const form = reactive({
+  parent_name: '',
+  child_name: '',
+  child_age: null,
+  phone: ''
+})
+
+function handleEnroll() {
+  if (isFull.value) return
+  form.parent_name = authStore.user.value?.name || ''
+  form.phone = authStore.user.value?.phone || ''
+  form.child_name = ''
+  form.child_age = null
+  errorMsg.value = ''
+  successMsg.value = ''
+  showModal.value = true
+}
+
+async function submitBooking() {
+  isSubmitting.value = true
+  errorMsg.value = ''
+  try {
+    const bookingData = {
+      parent_name: form.parent_name,
+      child_name: form.child_name,
+      child_age: form.child_age,
+      phone: form.phone,
+      activity_id: activity.value?.id || activityId
+    }
+    await api.createBooking(bookingData)
+    successMsg.value = 'Р—Р°СЏРІРєР° СѓСЃРїРµС€РЅРѕ РѕС‚РїСЂР°РІР»РµРЅР°! Р’С‹ РјРѕР¶РµС‚Рµ РѕС‚СЃР»РµР¶РёРІР°С‚СЊ РµРµ СЃС‚Р°С‚СѓСЃ РІ Р»РёС‡РЅРѕРј РєР°Р±РёРЅРµС‚Рµ.'
+  } catch (err) {
+    errorMsg.value = err.message || 'РћС€РёР±РєР° РїСЂРё РѕС‚РїСЂР°РІРєРµ Р·Р°СЏРІРєРё'
+  } finally {
+    isSubmitting.value = false
+  }
+}
+</script>
+
+<style scoped>
+/* Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ СЃС‚РёР»Рё РґР»СЏ РјРѕРґР°Р»СЊРЅРѕРіРѕ РѕРєРЅР° */
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.modal-card {
+  background: #ffffff;
+  width: 100%;
+  max-width: 440px;
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  padding: 24px;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.modal-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.btn-close {
+  background: #f3f4f6;
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-close:hover {
+  background: #fee2e2;
+  color: #70232f;
+}
+
+.modal-subtitle {
+  font-size: 14px;
+  color: var(--text-light, #666666);
+  margin-bottom: 20px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.form-input {
+  padding: 10px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  font-size: 14px;
+  color: var(--text-main, #333333);
+  background-color: #ffffff;
+  transition: border-color 0.2s ease;
+  box-sizing: border-box;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--primary-dark, #70232f);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.btn-cancel {
+  background: var(--bg-color, #ffffff);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-cancel:hover {
+  background: #e0e0e0;
+}
+
+.btn-submit {
+  background: var(--primary-dark, #70232f);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #ffffff;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  box-shadow: none;
+}
+
+.btn-submit:hover:not(:disabled) {
+  background: #581b25;
+}
+
+.btn-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.success-banner {
+  text-align: center;
+  padding: 20px 10px;
+}
+
+.success-banner p {
+  color: #065f46;
+  font-weight: 600;
+  margin-bottom: 20px;
+}
+
+.btn-view-profile {
+  display: inline-block;
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  text-decoration: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-weight: 500;
+}
+
+.error-banner {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 10px 14px;
+  border-radius: 5px;
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+/* РЎС‚РёР»Рё Р±Р»РѕРєР° РѕС‚Р·С‹РІРѕРІ */
+.add-review-box {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+
+.add-review-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  margin-bottom: 14px;
+  margin-top: 0;
+}
+
+.rating-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.rating-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.stars-selectable {
+  display: flex;
+  gap: 4px;
+}
+
+.star-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s ease;
+}
+
+.star-btn:hover {
+  transform: scale(1.15);
+}
+
+.review-textarea {
+  resize: vertical;
+  min-height: 80px;
+  width: 100%;
+}
+
+.auth-prompt-box {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 20px;
+  text-align: center;
+  margin-bottom: 24px;
+  border: 1px dashed #d1d5db;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-prompt-box p {
+  color: #666666;
+  font-size: 14px;
+  margin: 0;
+}
+
+.btn-auth-link {
+  display: inline-block;
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  padding: 8px 18px;
+  border-radius: 5px;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.reviews-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.review-card {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 16px 20px;
+  border: 1px solid #e5e7eb;
+}
+
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.author-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.author-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-main, #333333);
+}
+
+.review-date {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.stars-display {
+  display: flex;
+  gap: 2px;
+}
+
+.review-text {
+  font-size: 14px;
+  color: var(--text-main, #4b5563);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.no-reviews, .reviews-loading {
+  padding: 24px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 14px;
+  background: #ffffff;
+  border-radius: 5px;
+  border: 1px solid #e5e7eb;
+}
+
+.success-banner-inline {
+  color: #065f46;
+  background: #d1fae5;
+  padding: 10px 14px;
+  border-radius: 5px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.already-reviewed-box {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+  border-left: 3px solid var(--primary-dark, #70232f);
+  border-top: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.already-reviewed-box p {
+  color: var(--text-main, #333333);
+  font-weight: 500;
+  font-size: 14px;
+  margin: 0;
+}
+
+.enroll-action-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  align-self: flex-end;
+}
+
+.closed-notice {
+  font-size: 14px;
+  font-weight: 600;
+  color: #be123c;
+  background: #ffe4e6;
+  padding: 8px 16px;
+  border-radius: 5px;
+  border: 1px solid #fecdd3;
+  display: inline-flex;
+  align-items: center;
+  letter-spacing: 0.2px;
+}
+
+.btn-main.btn-disabled,
+.btn-main:disabled {
+  background: #9ca3af !important;
+  opacity: 0.55 !important;
+  cursor: not-allowed !important;
+  pointer-events: none;
+  box-shadow: none !important;
+}
+
+.badge-closed {
+  border: 1px solid #e11d48;
+  color: #e11d48;
+  background: #fff1f2;
+}
+</style>
+
+
+----- HomeView.vue -----
+<template>
+  <div class="content-wrapper">
+    <!-- Р’РµСЂС…РЅСЏСЏ РїР°РЅРµР»СЊ (РџРѕРёСЃРє, Р’РєР»Р°РґРєРё, РљР°СЂС‚Р°) -->
+    <TopBar 
+      v-model:searchQuery="searchQuery"
+      v-model:activeTab="activeTab"
+    />
+
+    <!-- РљРѕРЅС‚РµР№РЅРµСЂ РґР»СЏ РљРѕРЅС‚РµРЅС‚Р° Рё РЎР°Р№РґР±Р°СЂР° -->
+    <div class="main-layout">
+      <!-- Р›РµРІР°СЏ РєРѕР»РѕРЅРєР° СЃРѕ СЃРїРёСЃРєРѕРј СЃРµРєС†РёР№ Рё РєР°СЂС‚РѕС‡РµРє -->
+      <main class="cards-column">
+        <section 
+          v-for="group in filteredGroups" 
+          :key="group.title" 
+          class="category-section"
+        >
+          <h2 class="category-title">{{ group.title }}</h2>
+          <div class="cards-list">
+            <CardItem 
+              v-for="item in group.items" 
+              :key="item.id" 
+              :item="item" 
+            />
+          </div>
+        </section>
+
+        <div v-if="isLoading" class="loading-state" style="padding: 40px; text-align: center; color: #70232f; font-weight: 600;">
+          Р—Р°РіСЂСѓР·РєР° РєСЂСѓР¶РєРѕРІ...
+        </div>
+
+        <div v-else-if="filteredGroups.length === 0" class="no-results" style="padding: 40px; text-align: center; color: #666;">
+          РќРёС‡РµРіРѕ РЅРµ РЅР°Р№РґРµРЅРѕ РїРѕ РІР°С€РµРјСѓ Р·Р°РїСЂРѕСЃСѓ
+        </div>
+      </main>
+
+      <!-- РџСЂР°РІР°СЏ РєРѕР»РѕРЅРєР°: Р¤РёР»СЊС‚СЂС‹ (РЎР°Р№РґР±Р°СЂ) -->
+      <SidebarFilters 
+        v-model:selectedAge="selectedAge"
+        :selectedCategory="selectedCategory"
+        :selectedSubCategory="selectedSubCategory"
+        :activities="allRawActivities"
+        @update:gender="handleGenderChange"
+        @selectCategory="handleSelectCategory"
+      />
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import TopBar from '../components/TopBar.vue'
+import CardItem from '../components/CardItem.vue'
+import SidebarFilters from '../components/SidebarFilters.vue'
+import api from '../api'
+import { parseSchedule } from '../utils'
+
+const searchQuery = ref('')
+const activeTab = ref('all') // Р РµР¶РёРјС‹: 'all' (РІСЃРµ), 'paid' (РїР»Р°С‚РЅС‹Рµ), 'free' (Р±РµСЃРїР»Р°С‚РЅС‹Рµ)
+const selectedAge = ref('Р›СЋР±РѕР№')
+const selectedCategory = ref(null)
+const selectedSubCategory = ref(null)
+const genderFilter = ref({ male: true, female: true })
+const isLoading = ref(true)
+
+const rawSections = ref([])
+
+const allRawActivities = computed(() => {
+  const result = []
+  rawSections.value.forEach(section => {
+    result.push(...section.items)
+  })
+  return result
+})
+
+async function fetchActivities() {
+  isLoading.value = true
+  try {
+    const list = await api.getActivities()
+    if (!list || list.length === 0) {
+      rawSections.value = []
+      return
+    }
+
+    const groupedData = {}
+    list.forEach(item => {
+      const categoryName = item.category || 'Р”СЂСѓРіРѕРµ'
+      if (!groupedData[categoryName]) {
+        groupedData[categoryName] = []
+      }
+
+      let priceGroup = null
+      if (!item.is_free && item.price) {
+        priceGroup = {
+          mainText: item.price,
+          outlineBadge: item.is_first_free ? 'РџРµСЂРІРѕРµ Р±РµСЃРїР»Р°С‚РЅРѕ' : null
+        }
+      }
+
+      const parsedSched = parseSchedule(item.schedule)
+      const imageUrl = item.image_url ? item.image_url : '/image/Group330.svg'
+
+      groupedData[categoryName].push({
+        id: item.id,
+        title: item.title,
+        category: item.category || categoryName,
+        locationText: item.place ? `(${item.place})` : '',
+        isFree: !!item.is_free,
+        priceGroup: priceGroup,
+        hashtag: item.category ? `#${item.category}` : '',
+        gender_male: item.gender_male !== undefined && item.gender_male !== null ? item.gender_male : true,
+        gender_female: item.gender_female !== undefined && item.gender_female !== null ? item.gender_female : true,
+        age: item.age_group,
+        address: item.address,
+        place: item.place || '',
+        image: imageUrl,
+        schedule: {
+          days: parsedSched.days,
+          slots: parsedSched.slots
+        }
+      })
+    })
+
+    rawSections.value = Object.keys(groupedData).map(key => ({
+      title: key,
+      items: groupedData[key]
+    }))
+  } catch (err) {
+    console.warn('РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєСЂСѓР¶РєРё СЃ Р±СЌРєРµРЅРґР°:', err)
+    rawSections.value = []
+  } finally {
+    isLoading.value = false
+  }
+}
+
+onMounted(() => {
+  fetchActivities()
+})
+
+function handleGenderChange(val) {
+  genderFilter.value = val
+}
+
+function handleSelectCategory(catData) {
+  if (!catData || (!catData.category && !catData.subCategory)) {
+    selectedCategory.value = null
+    selectedSubCategory.value = null
+    return
+  }
+
+  if (catData.subCategory) {
+    if (selectedSubCategory.value === catData.subCategory) {
+      selectedSubCategory.value = null
+      selectedCategory.value = null
+    } else {
+      selectedSubCategory.value = catData.subCategory
+      selectedCategory.value = catData.category
+    }
+  } else if (catData.category) {
+    if (selectedCategory.value === catData.category && !selectedSubCategory.value) {
+      selectedCategory.value = null
+    } else {
+      selectedCategory.value = catData.category
+      selectedSubCategory.value = null
+    }
+  }
+}
+
+function parseAgeRange(ageStr) {
+  if (!ageStr) return null
+  const nums = ageStr.match(/\d+/g)
+  if (!nums) return null
+  if (nums.length === 1) {
+    const num = parseInt(nums[0], 10)
+    return { min: num, max: num }
+  } else if (nums.length >= 2) {
+    const num1 = parseInt(nums[0], 10)
+    const num2 = parseInt(nums[1], 10)
+    return { min: Math.min(num1, num2), max: Math.max(num1, num2) }
+  }
+  return null
+}
+
+const filteredGroups = computed(() => {
+  const query = searchQuery.value.toLowerCase().trim()
+  const tab = activeTab.value
+  const ageStr = selectedAge.value
+  const targetAgeNum = ageStr !== 'Р›СЋР±РѕР№' ? parseInt(ageStr.match(/\d+/)?.[0] || '0', 10) : null
+  const selCat = selectedCategory.value ? selectedCategory.value.toLowerCase() : null
+  const selSubCat = selectedSubCategory.value ? selectedSubCategory.value.toLowerCase() : null
+
+  return rawSections.value
+    .map(section => {
+      const sectionTitleLower = section.title.toLowerCase()
+
+      const filteredItems = section.items.filter(item => {
+        // 1. Р’РєР»Р°РґРєРё Р’СЃРµ / Р‘РµСЃРїР»Р°С‚РЅС‹Рµ / РџР»Р°С‚РЅС‹Рµ
+        if (tab === 'free' && !item.isFree) return false
+        if (tab === 'paid' && item.isFree) return false
+
+        // 2. Р¤РёР»СЊС‚СЂ РїРѕ РІРѕР·СЂР°СЃС‚Сѓ
+        if (targetAgeNum !== null && targetAgeNum > 0) {
+          const itemRange = parseAgeRange(item.age)
+          if (itemRange) {
+            if (targetAgeNum < itemRange.min || targetAgeNum > itemRange.max) {
+              return false
+            }
+          }
+        }
+
+        // 3. Р¤РёР»СЊС‚СЂ РїРѕ РїРѕР»Сѓ (РњСѓР¶СЃРєРѕР№ / Р–РµРЅСЃРєРёР№)
+        const wantMale = genderFilter.value.male
+        const wantFemale = genderFilter.value.female
+        if (!wantMale && !wantFemale) return false
+        if (wantMale && !wantFemale && !item.gender_male) return false
+        if (wantFemale && !wantMale && !item.gender_female) return false
+
+        // 4. Р¤РёР»СЊС‚СЂ РїРѕ РєР°С‚РµРіРѕСЂРёСЏРј РёР· РЎР°Р№РґР±Р°СЂР°
+        if (selSubCat) {
+          const itemTitleLower = (item.title || '').toLowerCase()
+          const itemHashtagLower = (item.hashtag || '').toLowerCase()
+          const itemLocationLower = (item.locationText || '').toLowerCase()
+          const itemPlaceLower = (item.place || '').toLowerCase()
+
+          const matchSub = itemTitleLower.includes(selSubCat) ||
+                           itemHashtagLower.includes(selSubCat) ||
+                           itemLocationLower.includes(selSubCat) ||
+                           itemPlaceLower.includes(selSubCat) ||
+                           sectionTitleLower.includes(selSubCat)
+          if (!matchSub) return false
+        } else if (selCat) {
+          const itemTitleLower = (item.title || '').toLowerCase()
+          const itemHashtagLower = (item.hashtag || '').toLowerCase()
+          const itemLocationLower = (item.locationText || '').toLowerCase()
+          const itemPlaceLower = (item.place || '').toLowerCase()
+
+          const matchCat = sectionTitleLower.includes(selCat) ||
+                           itemTitleLower.includes(selCat) ||
+                           itemHashtagLower.includes(selCat) ||
+                           itemLocationLower.includes(selCat) ||
+                           itemPlaceLower.includes(selCat)
+          if (!matchCat) return false
+        }
+
+        // 5. РџРѕРёСЃРє РІ РїРѕРёСЃРєРѕРІРѕР№ СЃС‚СЂРѕРєРµ
+        if (query) {
+          const matchTitle = item.title.toLowerCase().includes(query)
+          const matchHashtag = item.hashtag && item.hashtag.toLowerCase().includes(query)
+          const matchLocation = item.locationText && item.locationText.toLowerCase().includes(query)
+          const matchPlace = item.place && item.place.toLowerCase().includes(query)
+          const matchCat = sectionTitleLower.includes(query)
+          if (!matchTitle && !matchHashtag && !matchLocation && !matchPlace && !matchCat) {
+            return false
+          }
+        }
+
+        return true
+      })
+
+      return {
+        ...section,
+        items: filteredItems
+      }
+    })
+    .filter(section => section.items.length > 0)
+})
+</script>
+
+----- ProfileView.vue -----
+<template>
+  <div class="content-wrapper">
+    <!-- РЁР°РїРєР° РїСЂРѕС„РёР»СЏ -->
+    <div class="profile-header">
+      <div class="profile-avatar">
+        <img :src="getImageUrl('/image/Р›РѕРіРёРЅ1.svg')" alt="icon" class="icon" />
+      </div>
+      <div class="profile-info">
+        <h1 class="profile-name">{{ authStore.user.value?.name || 'РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ' }}</h1>
+        <div class="profile-meta">
+          <span class="profile-email">{{ authStore.user.value?.email }}</span>
+          <span v-if="authStore.user.value?.phone" class="profile-phone">вЂў {{ authStore.user.value?.phone }}</span>
+          <span class="role-pill" :class="authStore.user.value?.role">
+            {{ authStore.isLeader.value ? 'Р СѓРєРѕРІРѕРґРёС‚РµР»СЊ' : 'Р РѕРґРёС‚РµР»СЊ' }}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- РЈРІРµРґРѕРјР»РµРЅРёРµ / РўРѕР°СЃС‚ -->
+    <transition name="fade">
+      <div v-if="toastMessage" class="toast" :class="toastType">
+        {{ toastMessage }}
+      </div>
+    </transition>
+
+    <!-- РЎР•РљР¦РРЇ Р РЈРљРћР’РћР”РРўР•Р›РЇ -->
+    <section v-if="authStore.isLeader.value" class="dashboard-section">
+      <!-- РњРёРєСЂРѕ-Navbar СЂСѓРєРѕРІРѕРґРёС‚РµР»СЏ -->
+      <div class="leader-navbar">
+        <button 
+          class="leader-nav-tab" 
+          :class="{ active: activeLeaderTab === 'bookings' }"
+          @click="activeLeaderTab = 'bookings'"
+        >
+          Р—Р°СЏРІРєРё
+          <span class="tab-badge" v-if="bookings.length">{{ bookings.length }}</span>
+        </button>
+
+        <button 
+          class="leader-nav-tab" 
+          :class="{ active: activeLeaderTab === 'activities' }"
+          @click="activeLeaderTab = 'activities'"
+        >
+          РљСЂСѓР¶РєРё
+          <span class="tab-badge" v-if="myActivities.length">{{ myActivities.length }}</span>
+        </button>
+      </div>
+
+      <!-- Р’РљР›РђР”РљРђ 1: Р—РђРЇР’РљР -->
+      <div v-if="activeLeaderTab === 'bookings'">
+        <div class="section-header-row">
+          <div>
+            <h2 class="section-title">РЈРїСЂР°РІР»РµРЅРёРµ Р·Р°СЏРІРєР°РјРё</h2>
+            <p class="section-subtitle">РџРѕСЃС‚СѓРїРёРІС€РёРµ Р·Р°РїРёСЃРё РЅР° РІР°С€Рё РєСЂСѓР¶РєРё Рё СЃРµРєС†РёРё</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn-refresh" @click="loadData" :disabled="loading">
+              <img :src="getImageUrl('/image/РћР±РЅРѕРІРёС‚СЊ.svg')" alt="icon" class="icon" />
+              РћР±РЅРѕРІРёС‚СЊ
+            </button>
+          </div>
+        </div>
+
+        <!-- РЎС‚Р°С‚РёСЃС‚РёРєР° -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <span class="stat-label">Р’СЃРµРіРѕ Р·Р°СЏРІРѕРє</span>
+            <span class="stat-value">{{ bookings.length }}</span>
+          </div>
+          <div class="stat-card pending">
+            <span class="stat-label">РћР¶РёРґР°СЋС‚ СЂРµС€РµРЅРёСЏ</span>
+            <span class="stat-value">{{ countByStatus('РћР¶РёРґР°РµС‚') }}</span>
+          </div>
+          <div class="stat-card accepted">
+            <span class="stat-label">РџСЂРёРЅСЏС‚Рѕ</span>
+            <span class="stat-value">{{ countByStatus('РџСЂРёРЅСЏС‚Рѕ') }}</span>
+          </div>
+          <div class="stat-card rejected">
+            <span class="stat-label">РћС‚РєР»РѕРЅРµРЅРѕ</span>
+            <span class="stat-value">{{ countByStatus('РћС‚РєР»РѕРЅРµРЅРѕ') }}</span>
+          </div>
+        </div>
+
+        <!-- Р¤РёР»СЊС‚СЂС‹ РїРѕ СЃС‚Р°С‚СѓСЃР°Рј -->
+        <div class="filter-tabs">
+          <button 
+            v-for="status in ['Р’СЃРµ', 'РћР¶РёРґР°РµС‚', 'РџСЂРёРЅСЏС‚Рѕ', 'РћС‚РєР»РѕРЅРµРЅРѕ']" 
+            :key="status"
+            class="tab-btn"
+            :class="{ active: leaderFilter === status }"
+            @click="leaderFilter = status"
+          >
+            {{ status }}
+          </button>
+        </div>
+
+        <!-- РЎРїРёСЃРѕРє / РўР°Р±Р»РёС†Р° Р·Р°СЏРІРѕРє -->
+        <div v-if="loading" class="loading-state">
+          <div class="spinner"></div>
+          <span>Р—Р°РіСЂСѓР·РєР° Р·Р°СЏРІРѕРє...</span>
+        </div>
+
+        <div v-else-if="filteredLeaderBookings.length === 0" class="empty-state">
+          <p>Р—Р°СЏРІРѕРє СЃ РІС‹Р±СЂР°РЅРЅС‹РјРё РїР°СЂР°РјРµС‚СЂР°РјРё РЅРµ РЅР°Р№РґРµРЅРѕ.</p>
+        </div>
+
+        <div v-else class="bookings-list">
+          <div 
+            v-for="b in filteredLeaderBookings" 
+            :key="b.id" 
+            class="booking-card"
+            :class="`status-border-${getStatusClass(b.status)}`"
+          >
+            <div class="booking-header">
+              <div class="booking-club">
+                <span class="club-title">{{ b.activity?.title || `РљСЂСѓР¶РѕРє #${b.activity_id}` }}</span>
+                <span class="booking-date" v-if="b.created_at">РџРѕРґР°РЅРѕ: {{ b.created_at }}</span>
+              </div>
+              <span class="status-badge" :class="getStatusClass(b.status)">
+                {{ b.status }}
+              </span>
+            </div>
+
+            <div class="booking-body">
+              <div class="info-group">
+                <span class="label">Р РµР±С‘РЅРѕРє:</span>
+                <span class="value font-semibold">{{ b.child_name }} ({{ b.child_age }} Р»РµС‚)</span>
+              </div>
+              <div class="info-group">
+                <span class="label">Р РѕРґРёС‚РµР»СЊ:</span>
+                <span class="value">{{ b.parent_name }}</span>
+              </div>
+              <div class="info-group">
+                <span class="label">РўРµР»РµС„РѕРЅ:</span>
+                <a :href="`tel:${b.phone}`" class="value phone-link">{{ b.phone }}</a>
+              </div>
+            </div>
+
+            <div class="booking-actions">
+              <span class="action-label">РЎРјРµРЅРёС‚СЊ СЃС‚Р°С‚СѓСЃ:</span>
+              <div class="btn-group">
+                <button 
+                  class="btn-status accept" 
+                  :disabled="b.status === 'РџСЂРёРЅСЏС‚Рѕ' || updatingId === b.id"
+                  @click="changeStatus(b.id, 'РџСЂРёРЅСЏС‚Рѕ')"
+                >
+                  <span>РџСЂРёРЅСЏС‚СЊ</span>
+                </button>
+                <button 
+                  class="btn-status reject" 
+                  :disabled="b.status === 'РћС‚РєР»РѕРЅРµРЅРѕ' || updatingId === b.id"
+                  @click="changeStatus(b.id, 'РћС‚РєР»РѕРЅРµРЅРѕ')"
+                >
+                  <span>РћС‚РєР»РѕРЅРёС‚СЊ</span>
+                </button>
+                <button 
+                  class="btn-status pending" 
+                  :disabled="b.status === 'РћР¶РёРґР°РµС‚' || updatingId === b.id"
+                  @click="changeStatus(b.id, 'РћР¶РёРґР°РµС‚')"
+                >
+                  <span>Р’ РѕР¶РёРґР°РЅРёРµ</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Р’РљР›РђР”РљРђ 2: РњРћР РљР РЈР–РљР -->
+      <div v-else-if="activeLeaderTab === 'activities'">
+        <div class="section-header-row">
+          <div>
+            <h2 class="section-title">Р—Р°РєСЂРµРїР»РµРЅРЅС‹Рµ РєСЂСѓР¶РєРё</h2>
+            <p class="section-subtitle">РљСЂСѓР¶РєРё Рё СЃРµРєС†РёРё, СЃРѕР·РґР°РЅРЅС‹Рµ РІР°С€РёРј РїСЂРѕС„РёР»РµРј</p>
+          </div>
+          <div class="header-actions">
+            <router-link to="/create-activity" class="btn-primary-sm">
+              РЎРѕР·РґР°С‚СЊ РєСЂСѓР¶РѕРє
+            </router-link>
+            
+            <button class="btn-refresh" @click="loadData" :disabled="loading">
+              <img :src="getImageUrl('/image/РћР±РЅРѕРІРёС‚СЊ.svg')" alt="icon" class="icon" />
+              РћР±РЅРѕРІРёС‚СЊ
+            </button>
+          </div>
+        </div>
+
+        <div v-if="loading" class="loading-state">
+          <div class="spinner"></div>
+          <span>Р—Р°РіСЂСѓР·РєР° РІР°С€РёС… РєСЂСѓР¶РєРѕРІ...</span>
+        </div>
+
+        <div v-else-if="myActivities.length === 0" class="empty-state">
+          <h3>РЈ РІР°СЃ РїРѕРєР° РЅРµС‚ СЃРѕР·РґР°РЅРЅС‹С… РєСЂСѓР¶РєРѕРІ</h3>
+          <p>РќР°Р¶РјРёС‚Рµ РєРЅРѕРїРєСѓ В«РЎРѕР·РґР°С‚СЊ РєСЂСѓР¶РѕРєВ», С‡С‚РѕР±С‹ РґРѕР±Р°РІРёС‚СЊ РІР°С€Сѓ СЃРµРєС†РёСЋ РІ РєР°С‚Р°Р»РѕРі.</p>
+          <router-link to="/create-activity" class="btn-primary-sm mt-3">
+            + РЎРѕР·РґР°С‚СЊ РєСЂСѓР¶РѕРє
+          </router-link>
+        </div>
+
+        <div v-else class="my-activities-grid">
+          <div v-for="act in myActivities" :key="act.id" class="activity-card">
+            <div class="activity-card-image" :style="{ backgroundImage: `url(${getImageUrl(act.image_url)})` }">
+              <span class="act-badge">{{ act.category }}</span>
+            </div>
+            <div class="activity-card-body">
+              <h3 class="act-title">{{ act.title }}</h3>
+              <p class="act-address">{{ act.address }}</p>
+              <div class="act-meta">
+                <span class="act-meta-item">{{ act.age_group }}</span>
+                <span class="act-price-badge">{{ act.is_free ? 'Р‘РµСЃРїР»Р°С‚РЅРѕ' : act.price }}</span>
+              </div>
+              <div class="act-footer">
+                <div class="act-btn-row">
+                  <router-link :to="`/detail?id=${act.id}`" class="btn-act-action view" title="РћС‚РєСЂС‹С‚СЊ РєР°СЂС‚РѕС‡РєСѓ">
+                    РџСЂРѕСЃРјРѕС‚СЂ
+                  </router-link>
+                  <router-link :to="`/create-activity?id=${act.id}`" class="btn-act-action edit" title="Р РµРґР°РєС‚РёСЂРѕРІР°С‚СЊ">
+                    РР·РјРµРЅРёС‚СЊ
+                  </router-link>
+                  <button class="btn-act-action delete" @click="confirmDelete(act)" title="РЈРґР°Р»РёС‚СЊ">
+                    РЈРґР°Р»РёС‚СЊ
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- РЎР•РљР¦РРЇ Р РћР”РРўР•Р›РЇ: РРЎРўРћР РРЇ Р—РђРџРРЎР•Р™ -->
+    <section v-else class="dashboard-section">
+      <div class="section-header-row">
+        <div>
+          <h2 class="section-title">РСЃС‚РѕСЂРёСЏ РјРѕРёС… Р·Р°РїРёСЃРµР№</h2>
+          <p class="section-subtitle">РћС‚СЃР»РµР¶РёРІР°Р№С‚Рµ СЃС‚Р°С‚СѓСЃ РІР°С€РёС… Р·Р°СЏРІРѕРє РІ РєСЂСѓР¶РєРё Рё СЃРµРєС†РёРё</p>
+        </div>
+        <router-link to="/" class="btn-primary-sm">
+          РќР°Р№С‚Рё РЅРѕРІС‹Р№ РєСЂСѓР¶РѕРє
+        </router-link>
+      </div>
+
+      <!-- Р¤РёР»СЊС‚СЂС‹ РїРѕ СЃС‚Р°С‚СѓСЃСѓ -->
+      <div class="filter-tabs">
+        <button 
+          v-for="status in ['Р’СЃРµ', 'РћР¶РёРґР°РµС‚', 'РџСЂРёРЅСЏС‚Рѕ', 'РћС‚РєР»РѕРЅРµРЅРѕ']" 
+          :key="status"
+          class="tab-btn"
+          :class="{ active: parentFilter === status }"
+          @click="parentFilter = status"
+        >
+          {{ status }}
+        </button>
+      </div>
+
+      <div v-if="loading" class="loading-state">
+        <div class="spinner"></div>
+        <span>Р—Р°РіСЂСѓР·РєР° РёСЃС‚РѕСЂРёРё Р·Р°РїРёСЃРµР№...</span>
+      </div>
+
+      <div v-else-if="filteredParentBookings.length === 0" class="empty-state">
+        <h3>Р—Р°СЏРІРѕРє РЅРµ РЅР°Р№РґРµРЅРѕ</h3>
+        <p>Р’С‹ РїРѕРєР° РЅРµ РїРѕРґР°РІР°Р»Рё Р·Р°СЏРІРѕРє РёР»Рё РЅРµС‚ Р·Р°РїРёСЃРµР№ СЃ РІС‹Р±СЂР°РЅРЅС‹Рј СЃС‚Р°С‚СѓСЃРѕРј.</p>
+        <router-link to="/" class="btn-main mt-4">РљР°С‚Р°Р»РѕРі РєСЂСѓР¶РєРѕРІ</router-link>
+      </div>
+
+      <div v-else class="bookings-grid">
+        <div 
+          v-for="b in filteredParentBookings" 
+          :key="b.id" 
+          class="parent-booking-card"
+        >
+          <div class="card-top">
+            <div class="club-info">
+              <h3 class="club-title">{{ b.activity?.title || `РљСЂСѓР¶РѕРє #${b.activity_id}` }}</h3>
+              <p class="club-address" v-if="b.activity?.address">{{ b.activity.address }}</p>
+            </div>
+            <span class="status-badge" :class="getStatusClass(b.status)">
+              {{ b.status }}
+            </span>
+          </div>
+
+          <div class="card-details">
+            <div class="detail-item">
+              <span class="detail-label">Р РµР±РµРЅРѕРє</span>
+              <span class="detail-val">{{ b.child_name }}, {{ b.child_age }} Р»РµС‚</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">РљРѕРЅС‚Р°РєС‚РЅС‹Р№ С‚РµР»РµС„РѕРЅ</span>
+              <span class="detail-val">{{ b.phone }}</span>
+            </div>
+            <div class="detail-item" v-if="b.created_at">
+              <span class="detail-label">Р”Р°С‚Р° РїРѕРґР°С‡Рё</span>
+              <span class="detail-val">{{ b.created_at }}</span>
+            </div>
+          </div>
+
+          <div class="status-hint" :class="getStatusClass(b.status)">
+            <span v-if="b.status === 'РћР¶РёРґР°РµС‚'">Р’Р°С€Р° Р·Р°СЏРІРєР° РЅР°С…РѕРґРёС‚СЃСЏ РЅР° СЂР°СЃСЃРјРѕС‚СЂРµРЅРёРё СЂСѓРєРѕРІРѕРґРёС‚РµР»РµРј.</span>
+            <span v-else-if="b.status === 'РџСЂРёРЅСЏС‚Рѕ'">РџРѕР·РґСЂР°РІР»СЏРµРј! Р—Р°СЏРІРєР° РѕРґРѕР±СЂРµРЅР°. РЎ РІР°РјРё СЃРІСЏР¶СѓС‚СЃСЏ РїРѕ СѓРєР°Р·Р°РЅРЅРѕРјСѓ РЅРѕРјРµСЂСѓ.</span>
+            <span v-else-if="b.status === 'РћС‚РєР»РѕРЅРµРЅРѕ'">Рљ СЃРѕР¶Р°Р»РµРЅРёСЋ, Р·Р°РїРёСЃСЊ Р±С‹Р»Р° РѕС‚РєР»РѕРЅРµРЅР°. Р’С‹ РјРѕР¶РµС‚Рµ РІС‹Р±СЂР°С‚СЊ РґСЂСѓРіРѕР№ РєСЂСѓР¶РѕРє.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- РњРѕРґР°Р»СЊРЅРѕРµ РѕРєРЅРѕ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ СѓРґР°Р»РµРЅРёСЏ РєСЂСѓР¶РєР° -->
+    <transition name="fade">
+      <div v-if="deletingAct" class="modal-backdrop" @click.self="deletingAct = null">
+        <div class="modal-card modal-card-sm">
+          <div class="modal-header">
+            <h3 class="modal-title">РЈРґР°Р»РµРЅРёРµ РєСЂСѓР¶РєР°</h3>
+            <button class="btn-close" @click="deletingAct = null" aria-label="Р—Р°РєСЂС‹С‚СЊ">
+              Г—
+            </button>
+          </div>
+          <div class="modal-body">
+            <p>Р’С‹ РґРµР№СЃС‚РІРёС‚РµР»СЊРЅРѕ С…РѕС‚РёС‚Рµ СѓРґР°Р»РёС‚СЊ РєСЂСѓР¶РѕРє <strong>В«{{ deletingAct.title }}В»</strong>?</p>
+            <p class="warning-text">Р­С‚Рѕ РґРµР№СЃС‚РІРёРµ С‚Р°РєР¶Рµ СѓРґР°Р»РёС‚ РІСЃРµ РїРѕСЃС‚СѓРїРёРІС€РёРµ РЅР° СЌС‚РѕС‚ РєСЂСѓР¶РѕРє Р·Р°СЏРІРєРё. Р”Р°РЅРЅРѕРµ РґРµР№СЃС‚РІРёРµ РЅРµР»СЊР·СЏ РѕС‚РјРµРЅРёС‚СЊ.</p>
+          </div>
+          <div class="modal-actions mt-4">
+            <button type="button" class="btn-cancel" @click="deletingAct = null">РћС‚РјРµРЅР°</button>
+            <button type="button" class="btn-danger" :disabled="isDeleting" @click="executeDelete">
+              {{ isDeleting ? 'РЈРґР°Р»РµРЅРёРµ...' : 'Р”Р°, СѓРґР°Р»РёС‚СЊ' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, computed, onMounted } from 'vue'
+import { authStore } from '../authStore'
+import api from '../api'
+import { getImageUrl } from '../utils'
+
+const bookings = ref([])
+const myActivities = ref([])
+const loading = ref(true)
+const updatingId = ref(null)
+
+const deletingAct = ref(null)
+const isDeleting = ref(false)
+
+const activeLeaderTab = ref('bookings') // 'bookings' | 'activities'
+const leaderFilter = ref('Р’СЃРµ')
+const parentFilter = ref('Р’СЃРµ')
+
+const toastMessage = ref('')
+const toastType = ref('success')
+
+function confirmDelete(act) {
+  deletingAct.value = act
+}
+
+async function executeDelete() {
+  if (!deletingAct.value) return
+  isDeleting.value = true
+  try {
+    await api.deleteActivity(deletingAct.value.id)
+    showToast(`РљСЂСѓР¶РѕРє В«${deletingAct.value.title}В» СѓСЃРїРµС€РЅРѕ СѓРґР°Р»РµРЅ`, 'success')
+    deletingAct.value = null
+    await loadData()
+  } catch (err) {
+    showToast(err.message || 'РќРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ РєСЂСѓР¶РѕРє', 'error')
+  } finally {
+    isDeleting.value = false
+  }
+}
+
+function showToast(msg, type = 'success') {
+  toastMessage.value = msg
+  toastType.value = type
+  setTimeout(() => {
+    toastMessage.value = ''
+  }, 4000)
+}
+
+
+
+function getStatusClass(status) {
+  switch (status) {
+    case 'РџСЂРёРЅСЏС‚Рѕ': return 'accepted'
+    case 'РћС‚РєР»РѕРЅРµРЅРѕ': return 'rejected'
+    case 'РћР¶РёРґР°РµС‚':
+    default: return 'pending'
+  }
+}
+
+function countByStatus(status) {
+  return bookings.value.filter(b => b.status === status).length
+}
+
+const filteredLeaderBookings = computed(() => {
+  if (leaderFilter.value === 'Р’СЃРµ') return bookings.value
+  return bookings.value.filter(b => b.status === leaderFilter.value)
+})
+
+const filteredParentBookings = computed(() => {
+  if (parentFilter.value === 'Р’СЃРµ') return bookings.value
+  return bookings.value.filter(b => b.status === parentFilter.value)
+})
+
+async function loadData() {
+  loading.value = true
+  try {
+    if (authStore.isLeader.value) {
+      const [bRes, aRes] = await Promise.all([
+        api.getLeaderBookings(),
+        api.getLeaderActivities()
+      ])
+      bookings.value = bRes
+      myActivities.value = aRes
+    } else {
+      bookings.value = await api.getMyBookings()
+    }
+  } catch (err) {
+    showToast(err.message || 'РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё РґР°РЅРЅС‹С…', 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function changeStatus(bookingId, newStatus) {
+  updatingId.value = bookingId
+  try {
+    const updated = await api.updateBookingStatus(bookingId, newStatus)
+    const idx = bookings.value.findIndex(b => b.id === bookingId)
+    if (idx !== -1) {
+      bookings.value[idx] = updated
+    }
+    showToast(`РЎС‚Р°С‚СѓСЃ Р·Р°СЏРІРєРё #${bookingId} РёР·РјРµРЅРµРЅ РЅР° "${newStatus}"`, 'success')
+  } catch (err) {
+    showToast(err.message || 'РћС€РёР±РєР° СЃРјРµРЅС‹ СЃС‚Р°С‚СѓСЃР°', 'error')
+  } finally {
+    updatingId.value = null
+  }
+}
+
+onMounted(() => {
+  loadData()
+})
+</script>
+
+<style scoped>
+.content-wrapper {
+  width: 100%;
+}
+
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  padding: 20px 25px;
+  border-radius: 5px;
+  box-shadow: none;
+  margin-bottom: 20px;
+}
+
+.profile-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  flex-shrink: 0;
+}
+
+.profile-name {
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0 0 6px 0;
+}
+
+.profile-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 14px;
+  opacity: 0.9;
+}
+
+.role-pill {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 5px;
+  background-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+.role-pill.leader {
+  background-color: #ffd54f;
+  color: #3e2723;
+}
+
+/* Toast */
+.toast {
+  padding: 12px 20px;
+  border-radius: 5px;
+  margin-bottom: 20px;
+  font-weight: 600;
+  font-size: 14px;
+  box-shadow: none;
+}
+
+.toast.success {
+  background-color: #d1fae5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.toast.error {
+  background-color: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
+
+/* Leader Sub-Navbar */
+.leader-navbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 14px;
+}
+
+.leader-nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.leader-nav-tab:hover {
+  background: #e0e0e0;
+}
+
+.leader-nav-tab.active {
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  border-color: var(--primary-dark, #70232f);
+  box-shadow: none;
+}
+
+.tab-badge {
+  font-size: 12px;
+  font-weight: 600;
+
+  padding: 2px 8px;
+  border-radius: 5px;
+}
+
+.leader-nav-tab.active .tab-badge {
+  background: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+/* My Activities Grid */
+.my-activities-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.activity-card {
+  background: var(--bg-color, #ffffff);
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+  transition: transform 0.2s ease;
+}
+
+
+.activity-card-image {
+  height: 150px;
+  background-size: cover;
+  background-position: center;
+  position: relative;
+  padding: 12px;
+}
+
+.act-badge {
+  background: rgba(112, 35, 47, 0.9);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 5px;
+}
+
+.activity-card-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.act-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+  margin: 0;
+  line-height: 1.3;
+}
+
+.act-address {
+  font-size: 13px;
+  color: var(--text-light, #666666);
+  margin: 0;
+}
+
+.act-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.act-meta-item {
+  color: #4b5563;
+  font-weight: 500;
+}
+
+.act-price-badge {
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  background: #fce8eb;
+  padding: 3px 8px;
+  border-radius: 5px;
+}
+
+.act-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #f3f4f6;
+}
+
+.act-btn-row {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-act-action {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 6px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: var(--text-main, #333333);
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-act-action.view:hover {
+  background: #f3f4f6;
+}
+
+.btn-act-action.edit {
+  color: var(--primary-dark, #70232f);
+  border-color: #fce8eb;
+  background: #fff5f7;
+}
+
+.btn-act-action.edit:hover {
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  border-color: var(--primary-dark, #70232f);
+}
+
+.btn-act-action.delete {
+  color: #dc2626;
+  border-color: #fee2e2;
+  background: #fef2f2;
+}
+
+.btn-act-action.delete:hover {
+  background: #dc2626;
+  color: #ffffff;
+  border-color: #dc2626;
+}
+
+.modal-card-sm {
+  max-width: 440px;
+}
+
+.warning-text {
+  font-size: 13px;
+  color: #991b1b;
+  background: #fee2e2;
+  padding: 10px 12px;
+  border-radius: 5px;
+  margin-top: 12px;
+  line-height: 1.4;
+}
+
+.btn-danger {
+  background: #dc2626;
+  color: #ffffff;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.btn-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.section-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.section-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #2F050F;
+  margin: 0;
+}
+
+.section-subtitle {
+  font-size: 14px;
+  color: var(--text-light, #666666);
+  margin: 4px 0 0 0;
+}
+
+.btn-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  padding: 8px 14px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-refresh:hover {
+  background: #e0e0e0;
+}
+
+/* Stats */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--bg-color, #ffffff);
+  padding: 16px 20px;
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+}
+
+.stat-label {
+  font-size: 13px;
+  color: var(--text-light, #666666);
+  font-weight: 500;
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+  margin-top: 4px;
+}
+
+.stat-card.pending .stat-value { color: #d97706; }
+.stat-card.accepted .stat-value { color: #059669; }
+.stat-card.rejected .stat-value { color: #dc2626; }
+
+/* Filter Tabs */
+.filter-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 8px;
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-light, #666666);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  color: var(--text-main, #333333);
+  background-color: #f3f4f6;
+}
+
+.tab-btn.active {
+  color: var(--primary-dark, #70232f);
+  background-color: #fce8eb;
+}
+
+/* Loading & Empty */
+.loading-state, .empty-state {
+  text-align: center;
+  padding: 40px;
+  background: #ffffff;
+  border-radius: 5px;
+  border: 1px dashed #d1d5db;
+  color: var(--text-light, #666666);
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #f3f4f6;
+  border-top-color: var(--primary-dark, #70232f);
+  border-radius: 50%;
+  animation: spin 1s infinite linear;
+  margin: 0 auto 12px auto;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.empty-icon {
+  font-size: 40px;
+  margin-bottom: 8px;
+}
+
+/* Booking Card (Leader) */
+.bookings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.booking-card {
+  background: var(--bg-color, #ffffff);
+  border-radius: 5px;
+  border: 1px solid #d1d5db;
+  padding: 20px;
+  box-shadow: none;
+  transition: transform 0.2s ease;
+}
+
+.booking-card.status-border-pending { border-left: 4px solid #f59e0b; }
+.booking-card.status-border-accepted { border-left: 4px solid #10b981; }
+.booking-card.status-border-rejected { border-left: 4px solid #ef4444; }
+
+.booking-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+
+.club-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.booking-date {
+  display: block;
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+
+.status-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 5px;
+}
+
+.status-badge.pending { background: #fef3c7; color: #92400e; }
+.status-badge.accepted { background: #d1fae5; color: #065f46; }
+.status-badge.rejected { background: #fee2e2; color: #991b1b; }
+
+.booking-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  background: var(--bg-wrapper, #efefef);
+  padding: 14px;
+  border-radius: 5px;
+  margin-bottom: 16px;
+}
+
+.info-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.info-group .label {
+  font-size: 12px;
+  color: var(--text-light, #666666);
+}
+
+.info-group .value {
+  font-size: 14px;
+  color: var(--text-main, #333333);
+}
+
+.phone-link {
+  color: var(--primary-dark, #70232f);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.booking-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.action-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.btn-group {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-status {
+  padding: 7px 14px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s ease;
+}
+
+.btn-status:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-status.accept { background-color: #10b981; color: #ffffff; }
+.btn-status.accept:hover:not(:disabled) { background-color: #059669; }
+
+.btn-status.reject { background-color: #ef4444; color: #ffffff; }
+.btn-status.reject:hover:not(:disabled) { background-color: #dc2626; }
+
+.btn-status.pending { background-color: #f59e0b; color: #ffffff; }
+.btn-status.pending:hover:not(:disabled) { background-color: #d97706; }
+
+/* Parent Grid */
+.bookings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.parent-booking-card {
+  background: var(--bg-color, #ffffff);
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  padding: 20px;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.club-address {
+  font-size: 12px;
+  color: var(--text-light, #666666);
+  margin-top: 2px;
+}
+
+.card-details {
+  background: var(--bg-wrapper, #efefef);
+  padding: 12px 14px;
+  border-radius: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.detail-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.detail-label { color: var(--text-light, #666666); }
+.detail-val { font-weight: 600; color: var(--text-main, #333333); }
+
+.status-hint {
+  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: 5px;
+}
+
+.status-hint.pending { background: #fffbe8; color: #78350f; }
+.status-hint.accepted { background: #ecfdf5; color: #047857; }
+.status-hint.rejected { background: #fef2f2; color: #b91c1c; }
+
+.btn-primary-sm {
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  text-decoration: none;
+  padding: 8px 16px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.btn-main {
+  background: var(--primary-dark, #70232f);
+  color: #ffffff;
+  text-decoration: none;
+  padding: 10px 20px;
+  margin-top: 10px;
+  border-radius: 5px;
+  font-weight: 500;
+  display: inline-block;
+}
+
+/* Header Actions */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-actions .btn-primary-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  border: none;
+}
+
+/* Modal Overlay & Base Styling */
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.modal-card {
+  background: #ffffff;
+  width: 100%;
+  max-width: 520px;
+  border-radius: 5px;
+  border-top: 2px solid var(--primary-dark, #70232f);
+  padding: 24px 28px;
+  box-shadow: none;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.modal-card-lg {
+  max-width: 720px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.modal-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.btn-close {
+  background: #f3f4f6;
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-close:hover {
+  background: #fee2e2;
+  color: #70232f;
+}
+
+.scrollable-form {
+  overflow-y: auto;
+  padding-right: 8px;
+  max-height: calc(90vh - 110px);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+.full-width {
+  grid-column: 1 / -1;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.form-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main, #333333);
+}
+
+.form-input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  font-size: 14px;
+  color: var(--text-main, #333333);
+  background-color: #ffffff;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--primary-dark, #70232f);
+}
+
+.form-textarea {
+  min-height: 90px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+
+.form-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--primary-dark, #70232f);
+  text-transform: uppercase;
+  margin-top: 20px;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e5e7eb;
+  grid-column: 1 / -1;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+}
+
+.form-input-file {
+  font-size: 13px;
+  color: #6b7280;
+  padding: 6px 0;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid #f3f4f6;
+  grid-column: 1 / -1;
+}
+
+.btn-cancel {
+  background: var(--bg-color, #ffffff);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-cancel:hover {
+  background: #e0e0e0;
+}
+
+.btn-submit {
+  background: var(--primary-dark, #70232f);
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #ffffff;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: none;
+}
+
+.btn-submit:hover:not(:disabled) {
+  background: #581b25;
+}
+
+.btn-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.mt-1 { margin-top: 4px; }
+.mt-2 { margin-top: 8px; }
+.mt-3 { margin-top: 12px; }
+
+@media (max-width: 640px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+
+----- App.vue -----
+<template>
+  <div class="scroll-container">
+    <div class="app-container">
+      <AppHeader />
+      <router-view />
+    </div>
+  </div>
+</template>
+
+<script setup>
+import AppHeader from './components/AppHeader.vue'
+</script>
+

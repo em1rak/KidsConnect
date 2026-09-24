@@ -93,6 +93,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { getImageUrl } from '../utils'
 
 const props = defineProps({
   selectedAge: {
@@ -253,14 +254,7 @@ const displayCategories = computed(() => {
   return list
 })
 
-function getImageUrl(path) {
-  if (!path) return ''
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
-    return path
-  }
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
-  return base + path.replace(/^\//, '')
-}
+
 
 function toggleDropdown() {
   isDropdownOpen.value = !isDropdownOpen.value

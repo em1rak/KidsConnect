@@ -23,14 +23,30 @@ class Activity(Base):
     schedule = Column(String, nullable=True)
     group_subtitle = Column(String, nullable=True)
     teacher_name = Column(String, nullable=True)
-    spots_info = Column(String, nullable=True)
+    total_spots = Column(Integer, default=20, nullable=True)
+    _spots_info = Column("spots_info", String, nullable=True)
     duration = Column(String, nullable=True)
     base_level_info = Column(String, nullable=True)
     advanced_level_info = Column(String, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     owner = relationship("User", foreign_keys=[owner_id])
-    bookings = relationship("Booking", back_populates="activity")
+    bookings = relationship("Booking", back_populates="activity", lazy="selectin")
+
+    @property
+    def accepted_bookings_count(self) -> int:
+        if self.bookings:
+            return sum(1 for b in self.bookings if b.status == "Принято")
+        return 0
+
+    @property
+    def spots_info(self) -> str:
+        total = self.total_spots if self.total_spots is not None else 20
+        return f"{self.accepted_bookings_count} из {total}"
+
+    @spots_info.setter
+    def spots_info(self, value):
+        self._spots_info = value
 
 class Booking(Base):
     __tablename__ = "bookings"

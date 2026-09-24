@@ -42,6 +42,8 @@
 </template>
 
 <script setup>
+import { getImageUrl } from '../utils'
+
 defineProps({
   searchQuery: {
     type: String,
@@ -54,13 +56,4 @@ defineProps({
 })
 
 defineEmits(['update:searchQuery', 'update:activeTab', 'toggleMap'])
-
-function getImageUrl(path) {
-  if (!path) return ''
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
-    return path
-  }
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
-  return base + path.replace(/^\//, '')
-}
 </script>

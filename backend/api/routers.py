@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Header
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -272,7 +272,6 @@ def get_activity_bookings(
 def update_booking_status(
     booking_id: int,
     status_update: schemas.BookingStatusUpdate,
-    background_tasks: BackgroundTasks,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):

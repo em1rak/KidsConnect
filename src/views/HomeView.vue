@@ -53,6 +53,7 @@ import TopBar from '../components/TopBar.vue'
 import CardItem from '../components/CardItem.vue'
 import SidebarFilters from '../components/SidebarFilters.vue'
 import api from '../api'
+import { parseSchedule } from '../utils'
 
 const searchQuery = ref('')
 const activeTab = ref('all') // Режимы: 'all' (все), 'paid' (платные), 'free' (бесплатные)
@@ -71,27 +72,6 @@ const allRawActivities = computed(() => {
   })
   return result
 })
-
-function parseSchedule(scheduleStr) {
-  if (!scheduleStr) return { days: 'Расписание по запросу', slots: [] }
-
-  const firstDigitMatch = scheduleStr.match(/\d/)
-  if (firstDigitMatch && firstDigitMatch.index > 0) {
-    const daysPart = scheduleStr.slice(0, firstDigitMatch.index).trim().replace(/,\s*$/, '')
-    const timePart = scheduleStr.slice(firstDigitMatch.index).trim()
-
-    const slots = timePart.split(',').map(s => s.trim()).filter(Boolean)
-    return {
-      days: daysPart || 'Расписание по запросу',
-      slots: slots
-    }
-  }
-
-  return {
-    days: scheduleStr.trim(),
-    slots: []
-  }
-}
 
 async function fetchActivities() {
   isLoading.value = true

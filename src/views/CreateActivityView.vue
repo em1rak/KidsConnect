@@ -94,15 +94,30 @@
           </div>
 
           <div class="form-group">
-            
             <label class="form-label">Возрастная группа *</label>
-            <input 
-              v-model="form.age_group" 
-              type="text" 
-              class="form-input" 
-              placeholder="например, 10-18 лет" 
-              required 
-            />
+            <div class="age-range-row">
+              <span class="range-prefix">От</span>
+              <input 
+                v-model.number="ageFrom" 
+                type="number" 
+                min="0"
+                max="100"
+                class="form-input age-range-input" 
+                placeholder="10" 
+                required 
+              />
+              <span class="range-separator">До</span>
+              <input 
+                v-model.number="ageTo" 
+                type="number" 
+                min="0"
+                max="100"
+                class="form-input age-range-input" 
+                placeholder="18" 
+                required 
+              />
+              <span class="range-suffix">лет</span>
+            </div>
           </div>
 
           <div class="form-group">
@@ -230,12 +245,14 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label">Количество мест в группе</label>
+            <label class="form-label">Количество мест в группе (всего мест)</label>
             <input 
-              v-model="form.spots_info" 
-              type="text" 
+              v-model.number="form.total_spots" 
+              type="number" 
+              min="1"
+              max="500"
               class="form-input" 
-              placeholder="например, 15 из 20" 
+              placeholder="например, 20" 
             />
           </div>
 
@@ -365,6 +382,7 @@
 import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api from '../api'
+import { getImageUrl, parseSchedule } from '../utils'
 
 const router = useRouter()
 const route = useRoute()
@@ -379,6 +397,9 @@ const errorMsg = ref('')
 
 const isCategoryDropdownOpen = ref(false)
 const categoryDropdownRef = ref(null)
+
+const ageFrom = ref(10)
+const ageTo = ref(18)
 
 const priceAmount = ref(null)
 const priceUnit = ref('руб.')
@@ -481,6 +502,7 @@ const form = reactive({
   price: '',
   group_subtitle: '',
   teacher_name: '',
+  total_spots: 20,
   spots_info: '',
   duration: '',
   schedule: '',
@@ -501,6 +523,16 @@ onMounted(async () => {
       form.gender_male = data.gender_male !== undefined && data.gender_male !== null ? !!data.gender_male : true
       form.gender_female = data.gender_female !== undefined && data.gender_female !== null ? !!data.gender_female : true
       form.age_group = data.age_group || ''
+      if (data.age_group) {
+        const nums = (data.age_group.match(/\d+/g) || []).map(Number)
+        if (nums.length >= 2) {
+          ageFrom.value = nums[0]
+          ageTo.value = nums[1]
+        } else if (nums.length === 1) {
+          ageFrom.value = nums[0]
+          ageTo.value = nums[0]
+        }
+      }
       form.address = data.address || ''
       form.place = data.place || ''
       form.image_url = data.image_url || ''
@@ -519,30 +551,19 @@ onMounted(async () => {
 
       if (data.schedule) {
         form.schedule = data.schedule
-        const firstDigitMatch = data.schedule.match(/\d/)
-        if (firstDigitMatch) {
-          const dayPart = data.schedule.slice(0, firstDigitMatch.index)
-          const timePart = data.schedule.slice(firstDigitMatch.index)
-
-          const parsedDays = weekDaysOptions.filter(d => dayPart.includes(d))
-          if (parsedDays.length > 0) {
-            selectedDays.value = parsedDays
-          }
-
-          const parsedSlots = timePart.split(',').map(s => s.trim()).filter(Boolean)
-          if (parsedSlots.length > 0) {
-            timeSlots.value = parsedSlots.map(s => ({ value: s }))
-          }
-        } else {
-          const parsedDays = weekDaysOptions.filter(d => data.schedule.includes(d))
-          if (parsedDays.length > 0) {
-            selectedDays.value = parsedDays
-          }
+        const parsed = parseSchedule(data.schedule)
+        const parsedDays = weekDaysOptions.filter(d => parsed.days.includes(d))
+        if (parsedDays.length > 0) {
+          selectedDays.value = parsedDays
+        }
+        if (parsed.slots.length > 0) {
+          timeSlots.value = parsed.slots.map(s => ({ value: s }))
         }
       }
 
       form.group_subtitle = data.group_subtitle || ''
       form.teacher_name = data.teacher_name || ''
+      form.total_spots = data.total_spots !== undefined && data.total_spots !== null ? data.total_spots : 20
       form.spots_info = data.spots_info || ''
       form.duration = data.duration || ''
       form.description = data.description || ''
@@ -561,14 +582,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('click', handleCategoryClickOutside)
 })
 
-function getImageUrl(path) {
-  if (!path) return ''
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
-    return path
-  }
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
-  return base + path.replace(/^\//, '')
-}
+
 
 function onFreeChange() {
   if (form.is_free) {
@@ -609,12 +623,25 @@ async function submitForm() {
     const slotsStr = validSlots.join(', ')
     const finalSchedule = [daysStr, slotsStr].filter(Boolean).join(' ')
 
+    let computedAgeGroup = '10-18 лет'
+    if (ageFrom.value !== null && ageFrom.value !== '' && ageTo.value !== null && ageTo.value !== '') {
+      if (Number(ageFrom.value) === Number(ageTo.value)) {
+        computedAgeGroup = `${ageFrom.value} лет`
+      } else {
+        computedAgeGroup = `${ageFrom.value}-${ageTo.value} лет`
+      }
+    } else if (ageFrom.value !== null && ageFrom.value !== '') {
+      computedAgeGroup = `от ${ageFrom.value} лет`
+    } else if (ageTo.value !== null && ageTo.value !== '') {
+      computedAgeGroup = `до ${ageTo.value} лет`
+    }
+
     const payload = {
       title: form.title,
       category: form.category,
       gender_male: form.gender_male,
       gender_female: form.gender_female,
-      age_group: form.age_group,
+      age_group: computedAgeGroup,
       address: form.address,
       place: form.place,
       image_url: form.image_url || '/image/Group330.svg',
@@ -623,7 +650,7 @@ async function submitForm() {
       price: computedPrice,
       group_subtitle: form.group_subtitle,
       teacher_name: form.teacher_name,
-      spots_info: form.spots_info,
+      total_spots: form.total_spots ? Number(form.total_spots) : 20,
       duration: form.duration,
       schedule: finalSchedule,
       description: form.description,
@@ -940,6 +967,26 @@ select.form-input {
   overflow-y: auto;
   z-index: 100;
   padding: 4px 0;
+}
+
+.age-range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.range-prefix,
+.range-separator,
+.range-suffix {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main, #333333);
+  white-space: nowrap;
+}
+
+.age-range-input {
+  flex: 1;
+  min-width: 60px;
 }
 
 .price-input-row {

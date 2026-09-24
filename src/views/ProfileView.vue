@@ -336,6 +336,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { authStore } from '../authStore'
 import api from '../api'
+import { getImageUrl } from '../utils'
 
 const bookings = ref([])
 const myActivities = ref([])
@@ -379,17 +380,7 @@ function showToast(msg, type = 'success') {
   }, 4000)
 }
 
-function getImageUrl(path) {
-  if (!path) return import.meta.env.BASE_URL + 'image/Group330.svg'
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
-    return path
-  }
-  if (path.startsWith('/uploads/') || path.startsWith('/media/') || path.startsWith('uploads/')) {
-    return 'http://127.0.0.1:8000/' + path.replace(/^\//, '')
-  }
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
-  return base + path.replace(/^\//, '')
-}
+
 
 function getStatusClass(status) {
   switch (status) {

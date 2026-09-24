@@ -25,6 +25,7 @@
         <div class="detail-info">
           <div class="detail-badges">
             <span class="badge badge-outline" v-if="activity?.is_first_free">Первое бесплатно</span>
+            <span class="badge badge-closed" v-if="isFull">Набор закрыт</span>
             <span class="badge badge-outline" v-else>Набор открыт</span>
             <span class="badge badge-free font-semibold">{{ activity?.is_free ? 'Бесплатно' : (activity?.price || 'Бесплатно') }}</span>
           </div>
@@ -44,7 +45,17 @@
             </div>
           </div>
 
-          <button class="btn-main" @click="handleEnroll">Записаться</button>
+          <div class="enroll-action-wrapper">
+            <span v-if="isFull" class="closed-notice">Набор закрыт</span>
+            <button 
+              class="btn-main" 
+              :class="{ 'btn-disabled': isFull }" 
+              :disabled="isFull" 
+              @click="handleEnroll"
+            >
+              Записаться
+            </button>
+          </div>
         </div>
       </div>
     </section>
@@ -61,9 +72,9 @@
               <img :src="getImageUrl('/image/educationcapsvgrepocom1.svg')" class="icon" alt="teacher" />
               <span>{{ activity.teacher_name }}</span>
             </div>
-            <div class="stat-item" v-if="activity?.spots_info">
+            <div class="stat-item" v-if="spotsDisplay">
               <img :src="getImageUrl('/image/GroupMan.svg')" class="icon" alt="spots" />
-              <span>{{ activity.spots_info }}</span>
+              <span>{{ spotsDisplay }}</span>
             </div>
             <div class="stat-item" v-if="activity?.duration">
               <img :src="getImageUrl('/image/Group331.svg')" class="icon" alt="duration" />
@@ -365,6 +376,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { authStore } from '../authStore'
 import api from '../api'
+import { getImageUrl, parseSchedule } from '../utils'
 
 const route = useRoute()
 const activityId = computedId()
@@ -377,31 +389,23 @@ function computedId() {
 const activity = ref(null)
 const loadingActivity = ref(true)
 
+const spotsDisplay = computed(() => {
+  if (!activity.value) return ''
+  if (activity.value.spots_info) return activity.value.spots_info
+  const accepted = activity.value.accepted_bookings_count ?? 0
+  const total = activity.value.total_spots ?? 20
+  return `${accepted} из ${total}`
+})
+
+const isFull = computed(() => {
+  if (!activity.value) return false
+  const accepted = activity.value.accepted_bookings_count ?? 0
+  const total = activity.value.total_spots ?? 20
+  return total > 0 && accepted >= total
+})
+
 const parsedSchedule = computed(() => {
-  const scheduleStr = activity.value?.schedule
-  if (!scheduleStr) {
-    return {
-      days: 'Пн, Вт, Чт, Сб',
-      slots: ['08:00 - 10:00', '18:00 - 19:30']
-    }
-  }
-
-  const firstDigitMatch = scheduleStr.match(/\d/)
-  if (firstDigitMatch && firstDigitMatch.index > 0) {
-    const daysPart = scheduleStr.slice(0, firstDigitMatch.index).trim().replace(/,\s*$/, '')
-    const timePart = scheduleStr.slice(firstDigitMatch.index).trim()
-
-    const slots = timePart.split(',').map(s => s.trim()).filter(Boolean)
-    return {
-      days: daysPart || 'Расписание по запросу',
-      slots: slots
-    }
-  }
-
-  return {
-    days: scheduleStr.trim(),
-    slots: []
-  }
+  return parseSchedule(activity.value?.schedule)
 })
 
 // Переменные отзывов
@@ -475,17 +479,7 @@ onMounted(async () => {
 })
 
 
-function getImageUrl(path) {
-  if (!path) return import.meta.env.BASE_URL + 'image/Group330.svg'
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
-    return path
-  }
-  if (path.startsWith('/uploads/') || path.startsWith('/media/') || path.startsWith('uploads/')) {
-    return 'http://127.0.0.1:8000/' + path.replace(/^\//, '')
-  }
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
-  return base + path.replace(/^\//, '')
-}
+
 
 // Список открытых секций аккордеона программы
 const openAccordions = ref([1])
@@ -513,6 +507,7 @@ const form = reactive({
 })
 
 function handleEnroll() {
+  if (isFull.value) return
   form.parent_name = authStore.user.value?.name || ''
   form.phone = authStore.user.value?.phone || ''
   form.child_name = ''
@@ -886,6 +881,41 @@ async function submitBooking() {
   font-weight: 500;
   font-size: 14px;
   margin: 0;
+}
+
+.enroll-action-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  align-self: flex-end;
+}
+
+.closed-notice {
+  font-size: 14px;
+  font-weight: 600;
+  color: #be123c;
+  background: #ffe4e6;
+  padding: 8px 16px;
+  border-radius: 5px;
+  border: 1px solid #fecdd3;
+  display: inline-flex;
+  align-items: center;
+  letter-spacing: 0.2px;
+}
+
+.btn-main.btn-disabled,
+.btn-main:disabled {
+  background: #9ca3af !important;
+  opacity: 0.55 !important;
+  cursor: not-allowed !important;
+  pointer-events: none;
+  box-shadow: none !important;
+}
+
+.badge-closed {
+  border: 1px solid #e11d48;
+  color: #e11d48;
+  background: #fff1f2;
 }
 </style>
 

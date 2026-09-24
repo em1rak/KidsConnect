@@ -70,6 +70,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { authStore } from '../authStore'
 import api from '../api'
+import { getImageUrl } from '../utils'
 
 const notifRef = ref(null)
 const isNotifOpen = ref(false)
@@ -79,15 +80,6 @@ const loadingNotifs = ref(false)
 const unreadCount = computed(() => {
   return notifications.value.filter(n => !n.is_read).length
 })
-
-function getImageUrl(path) {
-  if (!path) return ''
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('data:')) {
-    return path
-  }
-  const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : import.meta.env.BASE_URL + '/'
-  return base + path.replace(/^\//, '')
-}
 
 // Загрузка списка уведомлений
 async function fetchNotifications() {

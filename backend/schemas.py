@@ -19,6 +19,7 @@ class ActivityBase(BaseModel):
     schedule: Optional[str] = None
     group_subtitle: Optional[str] = None
     teacher_name: Optional[str] = None
+    total_spots: Optional[int] = 20
     spots_info: Optional[str] = None
     duration: Optional[str] = None
     base_level_info: Optional[str] = None
@@ -30,6 +31,7 @@ class ActivityCreate(ActivityBase):
 
 class ActivityResponse(ActivityBase):
     id: int
+    accepted_bookings_count: int = 0
 
     class Config:
         from_attributes = True
